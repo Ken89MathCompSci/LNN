@@ -1,0 +1,61 @@
+{
+    "timestamp": "20250322_190313",
+    "house_number": 2,
+    "results": {
+        "Fridge": {
+            "model_path": "models/tcn/house2_20250322_190313\\Fridge\\tcn_model_best.pth",
+            "final_metrics": {
+                "mae": 20.905617372887825,
+                "rmse": 26.1742484373749,
+                "nete": 0.2166896176474795,
+                "precision": 0.806309071069295,
+                "recall": 0.9064598128660553,
+                "f1": 0.8563844419676749
+            }
+        },
+        "Dishwasher": {
+            "model_path": "models/tcn/house2_20250322_190313\\Dishwasher\\tcn_model_best.pth",
+            "final_metrics": {
+                "mae": 22.92474057565168,
+                "rmse": 27.02732293593732,
+                "nete": 0.22998299086544363,
+                "precision": 0.8279738000801135,
+                "recall": 0.9427223152157491,
+                "f1": 0.8853480576479313
+            }
+        },
+        "Microwave": {
+            "model_path": "models/tcn/house2_20250322_190313\\Microwave\\tcn_model_best.pth",
+            "final_metrics": {
+                "mae": 24.915378763264407,
+                "rmse": 29.012700290339982,
+                "nete": 0.25867397192204045,
+                "precision": 0.9003083170553386,
+                "recall": 0.9787410036114581,
+                "f1": 0.9395246603333984
+            }
+        },
+        "Washer_Dryer": {
+            "model_path": "models/tcn/house2_20250322_190313\\Washer_Dryer\\tcn_model_best.pth",
+            "final_metrics": {
+                "mae": 27.855894821457028,
+                "rmse": 34.80451438757678,
+                "nete": 0.2833387391293786,
+                "precision": 0.8992389011901127,
+                "recall": 1.0,
+                "f1": 0.961104579603983
+            }
+        },
+        "Kettle": {
+            "model_path": "models/tcn/house2_20250322_190313\\Kettle\\tcn_model_best.pth",
+            "final_metrics": {
+                "mae": 18.589032158008845,
+                "rmse": 23.238376914439357,
+                "nete": 0.19250635443175834,
+                "precision": 0.769751878267618,
+                "recall": 0.8648686580616963,
+                "f1": 0.8173102681646571
+            }
+        }
+    }
+}

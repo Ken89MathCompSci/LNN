@@ -1,0 +1,61 @@
+{
+    "timestamp": "20250322_185929",
+    "house_number": 1,
+    "results": {
+        "Fridge": {
+            "model_path": "models/transformer/house1_20250322_185929\\Fridge\\transformer_model_best.pth",
+            "final_metrics": {
+                "mae": 18.88650556321294,
+                "rmse": 21.29211998404487,
+                "nete": 0.18379764854767447,
+                "precision": 0.8228285694294445,
+                "recall": 0.9117350028396317,
+                "f1": 0.8672817861345381
+            }
+        },
+        "Dishwasher": {
+            "model_path": "models/transformer/house1_20250322_185929\\Dishwasher\\transformer_model_best.pth",
+            "final_metrics": {
+                "mae": 20.435693810546088,
+                "rmse": 24.504099299955314,
+                "nete": 0.19999049227369217,
+                "precision": 0.8609351479168356,
+                "recall": 0.9287450835334121,
+                "f1": 0.8948401157251238
+            }
+        },
+        "Microwave": {
+            "model_path": "models/transformer/house1_20250322_185929\\Microwave\\transformer_model_best.pth",
+            "final_metrics": {
+                "mae": 23.40353661621275,
+                "rmse": 25.996137618200713,
+                "nete": 0.23841465523247632,
+                "precision": 0.8621341305712762,
+                "recall": 0.986945068167273,
+                "f1": 0.9245395993692747
+            }
+        },
+        "Washer_Dryer": {
+            "model_path": "models/transformer/house1_20250322_185929\\Washer_Dryer\\transformer_model_best.pth",
+            "final_metrics": {
+                "mae": 22.447152103887746,
+                "rmse": 25.51013280589049,
+                "nete": 0.22497714375546904,
+                "precision": 0.9215596940029468,
+                "recall": 1.0,
+                "f1": 0.9724261900985238
+            }
+        },
+        "Kettle": {
+            "model_path": "models/transformer/house1_20250322_185929\\Kettle\\transformer_model_best.pth",
+            "final_metrics": {
+                "mae": 17.059593741535764,
+                "rmse": 21.985979988775185,
+                "nete": 0.17274126522474031,
+                "precision": 0.7343144829960264,
+                "recall": 0.8777499506146927,
+                "f1": 0.8060322168053595
+            }
+        }
+    }
+}

@@ -1,0 +1,61 @@
+{
+    "timestamp": "20250322_185612",
+    "house_number": 1,
+    "results": {
+        "Fridge": {
+            "model_path": "models/liquid/house1_20250322_185612\\Fridge\\advanced_liquid_model_best.pth",
+            "final_metrics": {
+                "mae": 15.491504721529843,
+                "rmse": 19.31094769860641,
+                "nete": 0.14772056745147005,
+                "precision": 0.8322880132674041,
+                "recall": 0.9382491131179123,
+                "f1": 0.8852685631926582
+            }
+        },
+        "Dishwasher": {
+            "model_path": "models/liquid/house1_20250322_185612\\Dishwasher\\advanced_liquid_model_best.pth",
+            "final_metrics": {
+                "mae": 17.410653743676736,
+                "rmse": 20.335896252584202,
+                "nete": 0.18068968876901378,
+                "precision": 0.8497781595154945,
+                "recall": 1.0,
+                "f1": 0.9257206094251599
+            }
+        },
+        "Microwave": {
+            "model_path": "models/liquid/house1_20250322_185612\\Microwave\\advanced_liquid_model_best.pth",
+            "final_metrics": {
+                "mae": 18.119886679049063,
+                "rmse": 19.253562017413053,
+                "nete": 0.1822937313548079,
+                "precision": 0.910045436586521,
+                "recall": 1.0,
+                "f1": 0.9624565271510545
+            }
+        },
+        "Washer_Dryer": {
+            "model_path": "models/liquid/house1_20250322_185612\\Washer_Dryer\\advanced_liquid_model_best.pth",
+            "final_metrics": {
+                "mae": 20.43016460559645,
+                "rmse": 25.705576201529794,
+                "nete": 0.20701515076013982,
+                "precision": 0.9183243382085855,
+                "recall": 1.0,
+                "f1": 0.9868999554132976
+            }
+        },
+        "Kettle": {
+            "model_path": "models/liquid/house1_20250322_185612\\Kettle\\advanced_liquid_model_best.pth",
+            "final_metrics": {
+                "mae": 13.10032909092372,
+                "rmse": 15.742203914772086,
+                "nete": 0.1312333727305015,
+                "precision": 0.816840929007075,
+                "recall": 0.8894974470373317,
+                "f1": 0.8531691880222034
+            }
+        }
+    }
+}

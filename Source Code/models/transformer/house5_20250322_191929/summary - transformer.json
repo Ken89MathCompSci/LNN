@@ -1,0 +1,61 @@
+{
+    "timestamp": "20250322_191929",
+    "house_number": 5,
+    "results": {
+        "Fridge": {
+            "model_path": "models/transformer/house5_20250322_191929\\Fridge\\transformer_model_best.pth",
+            "final_metrics": {
+                "mae": 19.46943378339477,
+                "rmse": 24.07718180797478,
+                "nete": 0.20087715852112187,
+                "precision": 0.8351741722275996,
+                "recall": 0.9173340546216031,
+                "f1": 0.8762541134246012
+            }
+        },
+        "Dishwasher": {
+            "model_path": "models/transformer/house5_20250322_191929\\Dishwasher\\transformer_model_best.pth",
+            "final_metrics": {
+                "mae": 21.201843956209498,
+                "rmse": 24.636647403583403,
+                "nete": 0.21613846422252567,
+                "precision": 0.9017716032185404,
+                "recall": 0.9439520676627626,
+                "f1": 0.9228618354406516
+            }
+        },
+        "Microwave": {
+            "model_path": "models/transformer/house5_20250322_191929\\Microwave\\transformer_model_best.pth",
+            "final_metrics": {
+                "mae": 22.804728004609647,
+                "rmse": 29.030337211371382,
+                "nete": 0.22842565871158663,
+                "precision": 0.9395396017637447,
+                "recall": 0.9907038967149554,
+                "f1": 0.96512174923935
+            }
+        },
+        "Washer_Dryer": {
+            "model_path": "models/transformer/house5_20250322_191929\\Washer_Dryer\\transformer_model_best.pth",
+            "final_metrics": {
+                "mae": 24.813245703448537,
+                "rmse": 30.571490273375503,
+                "nete": 0.25841273861172653,
+                "precision": 0.9455758720849531,
+                "recall": 0.9934535267711644,
+                "f1": 0.9695146994280588
+            }
+        },
+        "Kettle": {
+            "model_path": "models/transformer/house5_20250322_191929\\Kettle\\transformer_model_best.pth",
+            "final_metrics": {
+                "mae": 16.522655000860514,
+                "rmse": 20.15926401848306,
+                "nete": 0.1731636955068514,
+                "precision": 0.7975419740015895,
+                "recall": 0.8464805327593007,
+                "f1": 0.8220112533804451
+            }
+        }
+    }
+}
