@@ -65,11 +65,16 @@ def load_and_preprocess_ukdale(file_path, appliance_index, window_size=100, targ
     print(f"Appliance data shape: {appliance_data.shape}")
     
     # Get appliance name if available
-    if 'labelOut' in data and data['labelOut'].size > actual_appliance_index:
-        appliance_name = data['labelOut'][actual_appliance_index]
-        print(f"Appliance name: {appliance_name}")
-    else:
+    try:
+        if 'labelOut' in data and data['labelOut'].ndim > 1:
+            appliance_name = str(data['labelOut'][0, actual_appliance_index]).strip("[]'")
+        elif 'labelOut' in data and len(data['labelOut']) > actual_appliance_index:
+            appliance_name = str(data['labelOut'][actual_appliance_index]).strip("[]'")
+        else:
+            appliance_name = f"Appliance {appliance_index}"
+    except:
         appliance_name = f"Appliance {appliance_index}"
+    print(f"Appliance name: {appliance_name}")
     
     # Plot a sample of the data to verify
     plt.figure(figsize=(12, 6))
