@@ -29,18 +29,31 @@ with tables.open_file('Source Code/ukdale/ukdale.h5', 'r') as h5file:
     n_samples = len(idx_agg)
     print(f"Aggregate samples: {n_samples}")
 
-    # Load some appliances, say meters 2,3,4 as examples
+    # Load the correct appliances for UK-DALE house 1
+    # Based on training logs: 0=Fridge, 1=Dishwasher, 2=Microwave, 3=Washer_Dryer, 4=Kettle
+    # These typically correspond to meter IDs: Fridge(2), Dishwasher(3), Microwave(4), Washer_Dryer(5), Kettle(6)
+    appliance_meter_mapping = {
+        2: "Fridge",
+        3: "Dishwasher",
+        4: "Microwave",
+        5: "Washer_Dryer",
+        6: "Kettle"
+    }
+
     appliance_data = []
     appliance_names = []
-    for meter_id in [2,3,4]:
-        print(f"Loading meter {meter_id}...")
+    for meter_id, appliance_name in appliance_meter_mapping.items():
+        print(f"Loading meter {meter_id} ({appliance_name})...")
         try:
             idx_app, val_app = load_meter_data(h5file, meter_id, max_rows)
             if len(idx_app) == n_samples:
                 appliance_data.append(val_app)
-                appliance_names.append(f"Appliance_{meter_id}")
+                appliance_names.append(appliance_name)
+                print(f"  Successfully loaded {appliance_name} with {len(val_app)} samples")
+            else:
+                print(f"  Skipping {appliance_name} - sample count mismatch ({len(idx_app)} vs {n_samples})")
         except Exception as e:
-            print(f"Error loading meter {meter_id}: {e}")
+            print(f"  Error loading meter {meter_id} ({appliance_name}): {e}")
 
     if appliance_data:
         # Create input: [time, id (0 for agg), power]

@@ -65,9 +65,25 @@ def load_and_preprocess_ukdale(file_path, appliance_index, window_size=100, targ
     print(f"Appliance data shape: {appliance_data.shape}")
     
     # Get appliance name if available
-    if 'labelOut' in data and data['labelOut'].size > actual_appliance_index:
-        appliance_name = data['labelOut'][actual_appliance_index]
-        print(f"Appliance name: {appliance_name}")
+    if 'labelOut' in data and isinstance(data['labelOut'], np.ndarray):
+        label_out = data['labelOut']
+        if label_out.size > actual_appliance_index:
+            # Handle different labelOut structures
+            if label_out.ndim == 2 and label_out.shape[0] == 1:
+                # Shape is (1, N) - access as [0, index]
+                if isinstance(label_out[0, actual_appliance_index], np.ndarray) and label_out[0, actual_appliance_index].size > 0:
+                    appliance_name = str(label_out[0, actual_appliance_index].item()).strip()
+                else:
+                    appliance_name = str(label_out[0, actual_appliance_index]).strip()
+            else:
+                # 1D array
+                if isinstance(label_out[actual_appliance_index], np.ndarray) and label_out[actual_appliance_index].size > 0:
+                    appliance_name = str(label_out[actual_appliance_index].item()).strip()
+                else:
+                    appliance_name = str(label_out[actual_appliance_index]).strip()
+            print(f"Appliance name: {appliance_name}")
+        else:
+            appliance_name = f"Appliance {appliance_index}"
     else:
         appliance_name = f"Appliance {appliance_index}"
     
@@ -171,26 +187,35 @@ def create_sequences(mains, appliance, window_size, target_size=1):
 def explore_available_appliances(file_path):
     """
     Explore available appliances in a UK-DALE .mat file
-    
+
     Args:
         file_path: Path to the .mat file
-        
+
     Returns:
         Dictionary mapping appliance indices to their names
     """
     data = scipy.io.loadmat(file_path)
-    
+
     appliance_names = {}
-    
+
     # Check if labelOut is available
     if 'labelOut' in data and isinstance(data['labelOut'], np.ndarray):
         label_out = data['labelOut']
-        
+
+        # Handle different labelOut structures
+        if label_out.ndim == 2 and label_out.shape[0] == 1:
+            # Shape is (1, N) - flatten to get individual labels
+            label_out = label_out.flatten()
+
         # Skip the first 2 columns (time and ID)
         for i in range(2, len(label_out)):
-            # Clean the appliance name by stripping whitespace
-            appliance_names[i-2] = str(label_out[i]).strip()
-    
+            # Extract the appliance name from the array
+            if isinstance(label_out[i], np.ndarray) and label_out[i].size > 0:
+                appliance_name = str(label_out[i].item()).strip()
+            else:
+                appliance_name = str(label_out[i]).strip()
+            appliance_names[i-2] = appliance_name
+
     # If no names found, create generic ones
     if not appliance_names and 'output' in data:
         output_shape = data['output'].shape
@@ -198,7 +223,7 @@ def explore_available_appliances(file_path):
             # Skip the first 2 columns (time and ID)
             for i in range(output_shape[1] - 2):
                 appliance_names[i] = f"Appliance_{i}"
-    
+
     return appliance_names
 
 if __name__ == "__main__":
