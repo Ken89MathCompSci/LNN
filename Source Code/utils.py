@@ -4,21 +4,30 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import f1_score, precision_score, recall_score
 
-def calculate_nilm_metrics(y_true, y_pred, threshold=10):
+def calculate_nilm_metrics(y_true, y_pred, threshold=10, scaler=None):
     """
     Calculate NILM-specific metrics
-    
+
     Args:
         y_true: Ground truth values
         y_pred: Predicted values
         threshold: Power threshold for on/off state (Watts)
-        
+        scaler: Optional scaler to denormalize data for classification metrics
+
     Returns:
         Dictionary of metrics
     """
     # Flatten arrays
     y_true = y_true.flatten()
     y_pred = y_pred.flatten()
+
+    # Denormalize if scaler provided
+    if scaler is not None:
+        y_true_orig = scaler.inverse_transform(y_true.reshape(-1, 1)).flatten()
+        y_pred_orig = scaler.inverse_transform(y_pred.reshape(-1, 1)).flatten()
+    else:
+        y_true_orig = y_true
+        y_pred_orig = y_pred
     
     # Mean Absolute Error (MAE)
     mae = np.mean(np.abs(y_true - y_pred))
@@ -34,9 +43,9 @@ def calculate_nilm_metrics(y_true, y_pred, threshold=10):
     else:
         nete = np.inf
     
-    # Binarize for classification metrics (on/off detection)
-    y_true_binary = y_true > threshold
-    y_pred_binary = y_pred > threshold
+    # Binarize for classification metrics (on/off detection) using original scale
+    y_true_binary = y_true_orig > threshold
+    y_pred_binary = y_pred_orig > threshold
     
     # Calculate precision, recall, and F1 score
     precision = precision_score(y_true_binary, y_pred_binary, zero_division=0)

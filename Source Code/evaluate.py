@@ -43,7 +43,7 @@ def evaluate_model(model, data_loader, device):
     all_outputs = np.concatenate(all_outputs)
     
     # Calculate metrics
-    metrics = calculate_nilm_metrics(all_targets, all_outputs)
+    metrics = calculate_nilm_metrics(all_targets, all_outputs, scaler=data_dict.get('appliance_scaler'))
     
     return metrics, all_targets, all_outputs
 

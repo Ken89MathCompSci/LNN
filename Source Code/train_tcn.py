@@ -134,7 +134,7 @@ def train_tcn_model(data_dict, model_params, train_params, save_dir='models'):
         # Calculate NILM metrics
         all_targets = np.concatenate(all_targets)
         all_outputs = np.concatenate(all_outputs)
-        metrics = calculate_nilm_metrics(all_targets, all_outputs)
+        metrics = calculate_nilm_metrics(all_targets, all_outputs, scaler=data_dict.get('appliance_scaler'))
         history['val_metrics'].append(metrics)
         
         # Print epoch stats
