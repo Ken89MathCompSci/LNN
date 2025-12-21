@@ -6,6 +6,9 @@ import json
 from datetime import datetime
 from tqdm import tqdm
 
+# Add safe globals for PyTorch 2.6+ compatibility
+torch.serialization.add_safe_globals([np._core.multiarray.scalar])
+
 # Import from our modules
 from data_loader import load_and_preprocess_ukdale, explore_available_appliances
 from models import LSTMModel, GRUModel, TCNModel, LiquidNetworkModel, AdvancedLiquidNetworkModel, ResNetModel, SimpleTransformerModel
@@ -51,8 +54,7 @@ def load_trained_model(model_type, model_path, device):
     """Load a trained model from disk"""
     try:
         # Load the model checkpoint with safe globals for PyTorch 2.6+ compatibility
-        with torch.serialization.safe_globals([np._core.multiarray.scalar]):
-            checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+        checkpoint = torch.load(model_path, map_location=device, weights_only=True)
         model_params = checkpoint['model_params']
         
         # Create the appropriate model
@@ -341,7 +343,7 @@ def generate_appliance_comparison_plots(appliance_name, results, save_dir):
 def generate_summary_plots(all_results, save_dir):
     """
     Generate summary plots comparing model performance across all appliances
-    
+
     Args:
         all_results: Dictionary mapping appliance names to their results for all models
         save_dir: Directory to save the plots
@@ -350,16 +352,21 @@ def generate_summary_plots(all_results, save_dir):
     if not all_results:
         print("No results to generate summary plots.")
         return
-    
+
     # Get list of all appliances and model types
     appliances = list(all_results.keys())
-    
+
     # Get all unique model types across all appliances
     model_types = set()
     for app_results in all_results.values():
         model_types.update(app_results.keys())
     model_types = list(model_types)
-    
+
+    # Check if we have any model types
+    if not model_types:
+        print("No models were successfully loaded. Skipping summary plots.")
+        return
+
     # Metrics to compare
     metrics = ['mae', 'rmse', 'f1']
     
