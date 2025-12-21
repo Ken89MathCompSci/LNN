@@ -50,8 +50,9 @@ def evaluate_model(model, data_loader, device):
 def load_trained_model(model_type, model_path, device):
     """Load a trained model from disk"""
     try:
-        # Load the model checkpoint
-        checkpoint = torch.load(model_path, map_location=device)
+        # Load the model checkpoint with safe globals for PyTorch 2.6+ compatibility
+        with torch.serialization.safe_globals([np._core.multiarray.scalar]):
+            checkpoint = torch.load(model_path, map_location=device, weights_only=False)
         model_params = checkpoint['model_params']
         
         # Create the appropriate model
