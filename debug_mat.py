@@ -4,7 +4,7 @@ import os
 
 # Load the data
 folder_path = "Source Code/preprocessed_datasets/ukdale"
-file_path = os.path.join(folder_path, "ukdale1.mat")
+file_path = os.path.join(folder_path, "ukdale2.mat")
 
 print(f"Loading file: {file_path}")
 data = scipy.io.loadmat(file_path)
