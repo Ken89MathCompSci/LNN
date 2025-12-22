@@ -228,7 +228,7 @@ def explore_available_appliances(file_path):
 
 if __name__ == "__main__":
     folder_path = "preprocessed_datasets/ukdale"
-    file_path = os.path.join(folder_path, "ukdale1.mat")
+    file_path = os.path.join(folder_path, "ukdale2.mat")
     
     # Explore available appliances
     appliances = explore_available_appliances(file_path)
