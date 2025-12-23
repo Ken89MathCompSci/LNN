@@ -322,5 +322,5 @@ def train_lstm_all_appliances(house_number=1, window_size=100, save_dir='models/
     return results, base_save_dir
 
 if __name__ == "__main__":
-    # Train LSTM models on all appliances in house 1
-    results, save_dir = train_lstm_all_appliances(house_number=1)
+    # Train LSTM models on all appliances in house 2 (change house_number for different houses)
+    results, save_dir = train_lstm_all_appliances(house_number=2)
