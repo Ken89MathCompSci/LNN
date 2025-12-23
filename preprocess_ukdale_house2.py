@@ -46,16 +46,16 @@ with tables.open_file('Source Code/ukdale/ukdale.h5', 'r') as h5file:
     n_samples = len(idx_agg)
     print(f"Aggregate samples: {n_samples}")
 
-    # UK-DALE House 2 appliance mappings (may vary)
-    # Common appliances in House 2: Fridge, Washing Machine, Dishwasher, Television, Microwave, etc.
-    # We'll try to find appliances that match our target set
+    # UK-DALE House 2 appliance mappings - targeting specific appliances
+    # Target appliances: Fridge, Dishwasher, Microwave, Washer_Dryer, Kettle
     appliance_meter_mapping = {
-        2: "Fridge",           # Usually available
-        3: "Washing_Machine",  # House 2 has washing machine
-        4: "Dishwasher",       # May be available
-        5: "Television",       # House 2 has TV
-        6: "Microwave",        # Usually available
-        # Note: House 2 may not have kettle, we'll check what we can find
+        2: "Fridge",           # Usually available in House 2
+        3: "Washer_Dryer",     # House 2 washing machine (mapped to Washer_Dryer)
+        4: "Dishwasher",       # May be available in House 2
+        6: "Microwave",        # Usually available in House 2
+        7: "Kettle",           # Try higher meter numbers for kettle
+        8: "Kettle",           # Additional kettle possibility
+        # Note: Kettle availability varies by house in UK-DALE
     }
 
     appliance_data = []
