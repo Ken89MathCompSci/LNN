@@ -58,11 +58,10 @@ def train_resnet_model(data_dict, model_params, train_params, save_dir='models')
     
     # Learning rate scheduler
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, 
-        mode='min', 
-        factor=0.5, 
-        patience=patience//2,
-        verbose=True
+        optimizer,
+        mode='min',
+        factor=0.5,
+        patience=patience//2
     )
     
     # Training history
