@@ -46,16 +46,14 @@ with tables.open_file('Source Code/ukdale/ukdale.h5', 'r') as h5file:
     n_samples = len(idx_agg)
     print(f"Aggregate samples: {n_samples}")
 
-    # UK-DALE House 2 appliance mappings - targeting specific appliances
-    # Target appliances: Fridge, Dishwasher, Microwave, Washer_Dryer, Kettle
+    # UK-DALE House 2 appliance mappings - correct meter channels
+    # Based on provided information: exact meter channel mappings
     appliance_meter_mapping = {
-        2: "Fridge",           # Usually available in House 2
-        3: "Washer_Dryer",     # House 2 washing machine (mapped to Washer_Dryer)
-        4: "Dishwasher",       # May be available in House 2
-        6: "Microwave",        # Usually available in House 2
-        7: "Kettle",           # Try higher meter numbers for kettle
-        8: "Kettle",           # Additional kettle possibility
-        # Note: Kettle availability varies by house in UK-DALE
+        8: "Kettle",           # Meter channel 8
+        12: "Washing_Machine", # Meter channel 12 (separate washing machine)
+        13: "Dishwasher",      # Meter channel 13
+        14: "Fridge",          # Meter channel 14
+        15: "Microwave",       # Meter channel 15
     }
 
     appliance_data = []
