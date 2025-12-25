@@ -84,7 +84,7 @@ def load_trained_model(model_type, model_path, device):
         print(f"Error loading model from {model_path}: {str(e)}")
         return None
 
-def evaluate_and_compare_all_models(models_info, house_number=1, results_dir='results'):
+def evaluate_and_compare_all_models(models_info, house_number=2, results_dir='results'):
     """
     Evaluate and compare all trained models for all appliances
     
@@ -516,6 +516,6 @@ if __name__ == "__main__":
     }
     
     # Evaluate and compare all models
-    results, results_dir = evaluate_and_compare_all_models(models_info, house_number=1)
+    results, results_dir = evaluate_and_compare_all_models(models_info, house_number=2)
     
     print(f"Evaluation results saved to {results_dir}")
