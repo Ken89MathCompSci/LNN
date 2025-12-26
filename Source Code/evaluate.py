@@ -14,40 +14,41 @@ from data_loader import load_and_preprocess_ukdale, explore_available_appliances
 from models import LSTMModel, GRUModel, TCNModel, LiquidNetworkModel, AdvancedLiquidNetworkModel, ResNetModel, SimpleTransformerModel
 from utils import calculate_nilm_metrics, load_model, plot_prediction_examples
 
-def evaluate_model(model, data_loader, device):
+def evaluate_model(model, data_loader, device, scaler=None):
     """
     Evaluate a model on a dataset
-    
+
     Args:
         model: The PyTorch model
         data_loader: DataLoader for evaluation
         device: Device to run the model on
-        
+        scaler: Scaler for denormalizing data (optional)
+
     Returns:
         Dictionary of evaluation metrics
     """
     model.eval()
     all_targets = []
     all_outputs = []
-    
+
     with torch.no_grad():
         for inputs, targets in tqdm(data_loader, desc="Evaluating"):
             inputs = inputs.to(device)
-            
+
             # Forward pass
             outputs = model(inputs)
-            
+
             # Store targets and outputs for metrics calculation
             all_targets.append(targets.cpu().numpy())
             all_outputs.append(outputs.cpu().numpy())
-    
+
     # Concatenate all batches
     all_targets = np.concatenate(all_targets)
     all_outputs = np.concatenate(all_outputs)
-    
+
     # Calculate metrics
-    metrics = calculate_nilm_metrics(all_targets, all_outputs, scaler=data_dict.get('appliance_scaler'))
-    
+    metrics = calculate_nilm_metrics(all_targets, all_outputs, scaler=scaler)
+
     return metrics, all_targets, all_outputs
 
 def load_trained_model(model_type, model_path, device):
@@ -84,7 +85,7 @@ def load_trained_model(model_type, model_path, device):
         print(f"Error loading model from {model_path}: {str(e)}")
         return None
 
-def evaluate_and_compare_all_models(models_info, house_number=2, results_dir='results'):
+def evaluate_and_compare_all_models(models_info, house_number=5, results_dir='results'):
     """
     Evaluate and compare all trained models for all appliances
     
@@ -194,8 +195,8 @@ def evaluate_and_compare_all_models(models_info, house_number=2, results_dir='re
                 
                 # Evaluate the model
                 try:
-                    metrics, targets, outputs = evaluate_model(model, test_loader, device)
-                    
+                    metrics, targets, outputs = evaluate_model(model, test_loader, device, scaler=data_dict.get('appliance_scaler'))
+
                     # Store results
                     appliance_results[model_type] = {
                         'metrics': metrics,
