@@ -322,5 +322,5 @@ def train_tcn_all_appliances(house_number=1, window_size=100, save_dir='models/t
     return results, base_save_dir
 
 if __name__ == "__main__":
-    # Train TCN models on all appliances in house 2 (change house_number for different houses)
-    results, save_dir = train_tcn_all_appliances(house_number=2)
+    # Train TCN models on all appliances in house 5 (change house_number for different houses)
+    results, save_dir = train_tcn_all_appliances(house_number=5)

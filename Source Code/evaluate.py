@@ -516,6 +516,6 @@ if __name__ == "__main__":
     }
     
     # Evaluate and compare all models
-    results, results_dir = evaluate_and_compare_all_models(models_info, house_number=2)
+    results, results_dir = evaluate_and_compare_all_models(models_info, house_number=5)
     
     print(f"Evaluation results saved to {results_dir}")
