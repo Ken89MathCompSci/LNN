@@ -6,8 +6,8 @@ from sklearn.metrics import f1_score, precision_score, recall_score
 
 def calculate_nilm_metrics(y_true, y_pred, threshold=10, scaler=None):
     """
-    Calculate NILM-specific metrics
-
+    Calculate NILM-specific metrics with custom SAE calculation matching test_redd_specific_splits.py
+    
     Args:
         y_true: Ground truth values
         y_pred: Predicted values
@@ -43,9 +43,15 @@ def calculate_nilm_metrics(y_true, y_pred, threshold=10, scaler=None):
     else:
         nete = np.inf
     
-    # State Accuracy Error (SAE)
-    # SAE = 1 - State Accuracy
-    # State Accuracy = (TP + TN) / (TP + TN + FP + FN)
+    # Custom SAE calculation matching test_redd_specific_splits.py
+    N = 100  # Window size used in sequence creation
+    num_period = int(len(y_true) / N)
+    diff = 0
+    for i in range(num_period):
+        diff += abs(np.sum(y_true[i * N: (i + 1) * N]) - np.sum(y_pred[i * N: (i + 1) * N]))
+    sae = diff / (N * num_period)
+    
+    # State Accuracy Error (SAE) - traditional calculation for comparison
     y_true_binary = y_true_orig > threshold
     y_pred_binary = y_pred_orig > threshold
     
@@ -58,20 +64,26 @@ def calculate_nilm_metrics(y_true, y_pred, threshold=10, scaler=None):
     total_samples = len(y_true_binary)
     if total_samples > 0:
         state_accuracy = (tp + tn) / total_samples
-        sae = 1.0 - state_accuracy
+        traditional_sae = 1.0 - state_accuracy
     else:
-        sae = 0.0
+        traditional_sae = 0.0
     
     # Calculate precision, recall, and F1 score
-    precision = precision_score(y_true_binary, y_pred_binary, zero_division=0)
-    recall = recall_score(y_true_binary, y_pred_binary, zero_division=0)
-    f1 = f1_score(y_true_binary, y_pred_binary, zero_division=0)
+    precision = 0.0
+    recall = 0.0
+    f1 = 0.0
+    
+    if np.sum(y_true_binary) > 0 or np.sum(y_pred_binary) > 0:
+        precision = precision_score(y_true_binary, y_pred_binary, zero_division=0)
+        recall = recall_score(y_true_binary, y_pred_binary, zero_division=0)
+        f1 = f1_score(y_true_binary, y_pred_binary, zero_division=0)
     
     return {
         'mae': mae,
         'rmse': rmse,
         'nete': nete,
-        'sae': sae,
+        'sae': sae,  # Custom SAE calculation
+        'traditional_sae': traditional_sae,  # Traditional SAE for comparison
         'precision': precision,
         'recall': recall,
         'f1': f1
