@@ -1,0 +1,29 @@
+{
+    "appliance": "microwave",
+    "window_size": 100,
+    "model_params": {
+        "input_size": 1,
+        "hidden_size": 128,
+        "num_layers": 2,
+        "output_size": 1,
+        "bidirectional": true
+    },
+    "train_params": {
+        "lr": 0.001,
+        "epochs": 10,
+        "patience": 3
+    },
+    "final_metrics": {
+        "train_loss": 13684.10474975374,
+        "val_loss": 29153.87126890686,
+        "test_loss": 32032.409723062112,
+        "test_metrics": {
+            "mae": 24.610700607299805,
+            "rmse": 179.06387329101562,
+            "nete": 0.7220810055732727,
+            "precision": 0.16354556803995007,
+            "recall": 0.916083916083916,
+            "f1": 0.2775423728813559
+        }
+    }
+}

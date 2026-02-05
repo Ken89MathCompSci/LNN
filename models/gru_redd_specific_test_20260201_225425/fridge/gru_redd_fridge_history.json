@@ -1,0 +1,29 @@
+{
+    "appliance": "fridge",
+    "window_size": 100,
+    "model_params": {
+        "input_size": 1,
+        "hidden_size": 128,
+        "num_layers": 2,
+        "output_size": 1,
+        "bidirectional": true
+    },
+    "train_params": {
+        "lr": 0.001,
+        "epochs": 10,
+        "patience": 3
+    },
+    "final_metrics": {
+        "train_loss": 3295.5393941243487,
+        "val_loss": 4156.1304067018955,
+        "test_loss": 5388.582019244671,
+        "test_metrics": {
+            "mae": 47.90318298339844,
+            "rmse": 73.36455535888672,
+            "nete": 0.40879422426223755,
+            "precision": 0.5352607403404486,
+            "recall": 0.9919879819729595,
+            "f1": 0.6953316953316954
+        }
+    }
+}

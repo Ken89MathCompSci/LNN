@@ -1,0 +1,103 @@
+{
+    "timestamp": "20260202_145647",
+    "dataset_splits": {
+        "training": {
+            "house": 3,
+            "time_start": "2011-04-21 19:41:24",
+            "time_end": "2011-04-22 19:41:21"
+        },
+        "validation": {
+            "house": 3,
+            "time_start": "2011-05-23 10:31:24",
+            "time_end": "2011-05-24 10:31:21"
+        },
+        "testing": {
+            "house": 1,
+            "time_start": "2011-04-18 09:22:12",
+            "time_end": "2011-05-23 09:21:51"
+        }
+    },
+    "appliances": {
+        "dish washer": {
+            "on": 1143,
+            "off": 27657,
+            "total": 28800
+        },
+        "fridge": {
+            "on": 10471,
+            "off": 18329,
+            "total": 28800
+        },
+        "microwave": {
+            "on": 531,
+            "off": 28269,
+            "total": 28800
+        },
+        "washer dryer": {
+            "on": 1879,
+            "off": 26921,
+            "total": 28800
+        }
+    },
+    "window_size": 100,
+    "model_params": {
+        "hidden_size": 128,
+        "num_layers": 2,
+        "bidirectional": true
+    },
+    "train_params": {
+        "epochs": 10,
+        "lr": 0.001,
+        "patience": 3
+    },
+    "results": {
+        "dish washer": {
+            "model_path": "models/gru_redd_specific_test_20260202_145647\\dish_washer\\gru_redd_dish_washer_best.pth",
+            "final_metrics": {
+                "mae": 39.40252685546875,
+                "rmse": 174.72311401367188,
+                "nete": 0.776002824306488,
+                "sae": 0.20933433433433435,
+                "precision": 0.17989690721649484,
+                "recall": 0.8097447795823666,
+                "f1": 0.29439055250948964
+            }
+        },
+        "fridge": {
+            "model_path": "models/gru_redd_specific_test_20260202_145647\\fridge\\gru_redd_fridge_best.pth",
+            "final_metrics": {
+                "mae": 45.897544860839844,
+                "rmse": 70.62489318847656,
+                "nete": 0.4207746684551239,
+                "sae": 0.15728228228228225,
+                "precision": 0.6151930261519303,
+                "recall": 0.9894842263395093,
+                "f1": 0.758686888078326
+            }
+        },
+        "microwave": {
+            "model_path": "models/gru_redd_specific_test_20260202_145647\\microwave\\gru_redd_microwave_best.pth",
+            "final_metrics": {
+                "mae": 32.118324279785156,
+                "rmse": 179.3688507080078,
+                "nete": 0.5015618801116943,
+                "sae": 0.43155655655655656,
+                "precision": 0.035934868051656375,
+                "recall": 0.8951048951048951,
+                "f1": 0.06909581646423751
+            }
+        },
+        "washer dryer": {
+            "model_path": "models/gru_redd_specific_test_20260202_145647\\washer_dryer\\gru_redd_washer_dryer_best.pth",
+            "final_metrics": {
+                "mae": 22.8961124420166,
+                "rmse": 78.53590393066406,
+                "nete": 398.2873840332031,
+                "sae": 0.083958958958959,
+                "precision": 0.3229050279329609,
+                "recall": 0.8163841807909604,
+                "f1": 0.46277021617293834
+            }
+        }
+    }
+}

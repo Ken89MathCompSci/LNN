@@ -1,0 +1,30 @@
+{
+    "appliance": "dish washer",
+    "window_size": 100,
+    "model_params": {
+        "input_size": 1,
+        "hidden_size": 128,
+        "num_layers": 2,
+        "output_size": 1,
+        "bidirectional": true
+    },
+    "train_params": {
+        "lr": 0.001,
+        "epochs": 10,
+        "patience": 3
+    },
+    "final_metrics": {
+        "train_loss": 13179.29871427748,
+        "val_loss": 11986.211248713731,
+        "test_loss": 30981.53389485944,
+        "test_metrics": {
+            "mae": 37.722774505615234,
+            "rmse": 176.09986877441406,
+            "nete": 0.8811026215553284,
+            "sae": 0.10247747747747749,
+            "precision": 0.32616487455197135,
+            "recall": 0.8445475638051044,
+            "f1": 0.47058823529411764
+        }
+    }
+}

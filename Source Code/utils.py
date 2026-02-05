@@ -43,9 +43,24 @@ def calculate_nilm_metrics(y_true, y_pred, threshold=10, scaler=None):
     else:
         nete = np.inf
     
-    # Binarize for classification metrics (on/off detection) using original scale
+    # State Accuracy Error (SAE)
+    # SAE = 1 - State Accuracy
+    # State Accuracy = (TP + TN) / (TP + TN + FP + FN)
     y_true_binary = y_true_orig > threshold
     y_pred_binary = y_pred_orig > threshold
+    
+    # Calculate confusion matrix components
+    tp = np.sum((y_true_binary == 1) & (y_pred_binary == 1))
+    tn = np.sum((y_true_binary == 0) & (y_pred_binary == 0))
+    fp = np.sum((y_true_binary == 0) & (y_pred_binary == 1))
+    fn = np.sum((y_true_binary == 1) & (y_pred_binary == 0))
+    
+    total_samples = len(y_true_binary)
+    if total_samples > 0:
+        state_accuracy = (tp + tn) / total_samples
+        sae = 1.0 - state_accuracy
+    else:
+        sae = 0.0
     
     # Calculate precision, recall, and F1 score
     precision = precision_score(y_true_binary, y_pred_binary, zero_division=0)
@@ -56,6 +71,7 @@ def calculate_nilm_metrics(y_true, y_pred, threshold=10, scaler=None):
         'mae': mae,
         'rmse': rmse,
         'nete': nete,
+        'sae': sae,
         'precision': precision,
         'recall': recall,
         'f1': f1

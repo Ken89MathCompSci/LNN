@@ -1,0 +1,29 @@
+{
+    "appliance": "washer dryer",
+    "window_size": 100,
+    "model_params": {
+        "input_size": 1,
+        "hidden_size": 128,
+        "num_layers": 2,
+        "output_size": 1,
+        "bidirectional": true
+    },
+    "train_params": {
+        "lr": 0.001,
+        "epochs": 10,
+        "patience": 3
+    },
+    "final_metrics": {
+        "train_loss": 525126.3470140457,
+        "val_loss": 1162218.696622277,
+        "test_loss": 1908.1243318682598,
+        "test_metrics": {
+            "mae": 7.884470462799072,
+            "rmse": 43.70359802246094,
+            "nete": 122.04619598388672,
+            "precision": 0.43776223776223777,
+            "recall": 0.884180790960452,
+            "f1": 0.5855940130963517
+        }
+    }
+}
