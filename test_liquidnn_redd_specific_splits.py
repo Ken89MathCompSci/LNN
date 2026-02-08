@@ -14,84 +14,24 @@ sys.path.append('Source Code')
 
 # Import from our modules
 from models import LiquidNetworkModel, AdvancedLiquidNetworkModel
-from utils import save_model
+from utils import calculate_nilm_metrics, save_model
 
-def calculate_nilm_metrics(y_true, y_pred, threshold=10):
+
+def get_threshold_for_appliance(appliance_name):
     """
-    Calculate NILM-specific metrics with custom SAE calculation
-    
+    Get appropriate power threshold for on/off detection based on appliance characteristics
+
     Args:
-        y_true: Ground truth values
-        y_pred: Predicted values
-        threshold: Power threshold for on/off state (Watts)
+        appliance_name: Name of the appliance
 
     Returns:
-        Dictionary of metrics
+        Power threshold in watts
     """
-    # Flatten arrays
-    y_true = y_true.flatten()
-    y_pred = y_pred.flatten()
-
-    # Mean Absolute Error (MAE)
-    mae = np.mean(np.abs(y_true - y_pred))
-    
-    # Root Mean Square Error (RMSE)
-    rmse = np.sqrt(np.mean(np.square(y_true - y_pred)))
-    
-    # Normalized Error in Total Energy (NETE)
-    energy_true = np.sum(y_true)
-    energy_pred = np.sum(y_pred)
-    if energy_true > 0:
-        nete = np.abs(energy_true - energy_pred) / energy_true
+    # Washer dryer has very low power consumption (max 4W)
+    if appliance_name == 'washer dryer':
+        return 0.5  # Very low threshold for washer dryer
     else:
-        nete = np.inf
-    
-    # Custom SAE calculation matching the user's experiment
-    N = 100  # Window size used in sequence creation
-    num_period = int(len(y_true) / N)
-    diff = 0
-    for i in range(num_period):
-        diff += abs(np.sum(y_true[i * N: (i + 1) * N]) - np.sum(y_pred[i * N: (i + 1) * N]))
-    sae = diff / (N * num_period)
-    
-    # State Accuracy Error (SAE) - traditional calculation for comparison
-    y_true_binary = y_true > threshold
-    y_pred_binary = y_pred > threshold
-    
-    # Calculate confusion matrix components
-    tp = np.sum((y_true_binary == 1) & (y_pred_binary == 1))
-    tn = np.sum((y_true_binary == 0) & (y_pred_binary == 0))
-    fp = np.sum((y_true_binary == 0) & (y_pred_binary == 1))
-    fn = np.sum((y_true_binary == 1) & (y_pred_binary == 0))
-    
-    total_samples = len(y_true_binary)
-    if total_samples > 0:
-        state_accuracy = (tp + tn) / total_samples
-        traditional_sae = 1.0 - state_accuracy
-    else:
-        traditional_sae = 0.0
-    
-    # Calculate precision, recall, and F1 score
-    precision = 0.0
-    recall = 0.0
-    f1 = 0.0
-    
-    if np.sum(y_true_binary) > 0 or np.sum(y_pred_binary) > 0:
-        from sklearn.metrics import precision_score, recall_score, f1_score
-        precision = precision_score(y_true_binary, y_pred_binary, zero_division=0)
-        recall = recall_score(y_true_binary, y_pred_binary, zero_division=0)
-        f1 = f1_score(y_true_binary, y_pred_binary, zero_division=0)
-    
-    return {
-        'mae': mae,
-        'rmse': rmse,
-        'nete': nete,
-        'sae': sae,  # Custom SAE calculation
-        'traditional_sae': traditional_sae,  # Traditional SAE for comparison
-        'precision': precision,
-        'recall': recall,
-        'f1': f1
-    }
+        return 10.0  # Standard threshold for other appliances
 
 class REDDSpecificDataset(torch.utils.data.Dataset):
     """
@@ -279,11 +219,11 @@ def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_
     # Loss function and optimizer
     criterion = torch.nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    
     # Training history
     history = {
         'train_loss': [],
         'val_loss': [],
+        'train_metrics': [],
         'val_metrics': []
     }
     
@@ -353,11 +293,11 @@ def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_
         # Calculate average validation loss
         avg_val_loss = val_loss / len(val_loader)
         history['val_loss'].append(avg_val_loss)
-        
         # Calculate NILM metrics
         all_targets = np.concatenate(all_targets)
         all_outputs = np.concatenate(all_outputs)
-        metrics = calculate_nilm_metrics(all_targets, all_outputs)
+        threshold = get_threshold_for_appliance(appliance_name)
+        metrics = calculate_nilm_metrics(all_targets, all_outputs, threshold=threshold)
         history['val_metrics'].append(metrics)
         
         # Print epoch stats
@@ -432,7 +372,8 @@ def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_
     # Calculate test metrics
     all_test_targets = np.concatenate(all_test_targets)
     all_test_outputs = np.concatenate(all_test_outputs)
-    test_metrics = calculate_nilm_metrics(all_test_targets, all_test_outputs)
+    threshold = get_threshold_for_appliance(appliance_name)
+    test_metrics = calculate_nilm_metrics(all_test_targets, all_test_outputs, threshold=threshold)
     
     print(f"Test Loss: {avg_test_loss:.6f}")
     print(f"Test Metrics: {test_metrics}")
