@@ -367,6 +367,8 @@ def train_tcn_on_specific_redd_appliance(data_dict, appliance_name, window_size=
     all_test_targets = np.concatenate(all_test_targets)
     all_test_outputs = np.concatenate(all_test_outputs)
     threshold = get_threshold_for_appliance(appliance_name)
+    test_metrics = calculate_nilm_metrics(all_test_targets, all_test_outputs, threshold=threshold)
+
     # Aggregates (val/test) — train per-epoch metrics not collected
     val_mae_series = [m['mae'] for m in history['val_metrics']]
     val_sae_series = [m['sae'] for m in history['val_metrics']]
