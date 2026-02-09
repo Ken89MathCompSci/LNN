@@ -495,7 +495,7 @@ def train_transformer_on_specific_redd_appliance(data_dict, appliance_name, wind
     return model, history, test_metrics
 
 def test_transformer_on_all_redd_appliances(window_size=100, hidden_size=128, num_layers=3,
-                                          num_heads=4, dropout=0.1, epochs=50, lr=0.001, patience=10):
+                                          num_heads=4, dropout=0.1, epochs=20, lr=0.001, patience=10):
     """
     Test Transformer model on all specified REDD appliances with the exact splits you mentioned
     
