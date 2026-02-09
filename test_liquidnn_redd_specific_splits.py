@@ -132,7 +132,7 @@ def create_sequences(data, window_size=100, target_size=1):
 
 def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_size=100,
                                             hidden_size=128, num_layers=2, dt=0.1, advanced=True,
-                                            epochs=50, lr=0.001, patience=10, save_dir='models/liquidnn_redd_specific'):
+                                            epochs=20, lr=0.001, patience=10, save_dir='models/liquidnn_redd_specific'):
     """
     Train Liquid Neural Network model on a specific REDD appliance with the exact splits you specified
     
@@ -239,6 +239,8 @@ def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_
         # Training phase
         model.train()
         train_loss = 0.0
+        train_targets = []
+        train_outputs = []
         
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
         for inputs, targets in progress_bar:
@@ -261,10 +263,21 @@ def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_
             # Update statistics
             train_loss += loss.item()
             progress_bar.set_postfix({'loss': loss.item()})
+
+            # Collect for train metrics
+            train_targets.append(targets.detach().cpu().numpy())
+            train_outputs.append(outputs.detach().cpu().numpy())
         
         # Calculate average training loss
         avg_train_loss = train_loss / len(train_loader)
         history['train_loss'].append(avg_train_loss)
+
+        # Training metrics
+        train_targets = np.concatenate(train_targets)
+        train_outputs = np.concatenate(train_outputs)
+        train_threshold = get_threshold_for_appliance(appliance_name)
+        train_metrics = calculate_nilm_metrics(train_targets, train_outputs, threshold=train_threshold)
+        history['train_metrics'].append(train_metrics)
         
         # Validation phase
         model.eval()
@@ -296,8 +309,8 @@ def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_
         # Calculate NILM metrics
         all_targets = np.concatenate(all_targets)
         all_outputs = np.concatenate(all_outputs)
-        threshold = get_threshold_for_appliance(appliance_name)
-        metrics = calculate_nilm_metrics(all_targets, all_outputs, threshold=threshold)
+        val_threshold = get_threshold_for_appliance(appliance_name)
+        metrics = calculate_nilm_metrics(all_targets, all_outputs, threshold=val_threshold)
         history['val_metrics'].append(metrics)
         
         # Print epoch stats
@@ -378,27 +391,60 @@ def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_
     print(f"Test Loss: {avg_test_loss:.6f}")
     print(f"Test Metrics: {test_metrics}")
     
-    # Plot training history
-    plt.figure(figsize=(12, 4))
-    
-    plt.subplot(1, 2, 1)
-    plt.plot(history['train_loss'], label='Train Loss')
-    plt.plot(history['val_loss'], label='Validation Loss')
-    plt.title(f'Training and Validation Loss - {appliance_name}')
+    # Plot metrics (loss, MAE, SAE, F1)
+    plt.figure(figsize=(15, 10))
+
+    # Loss
+    plt.subplot(2, 2, 1)
+    plt.plot(history['train_loss'], label='Train Loss', color='blue')
+    plt.plot(history['val_loss'], label='Val Loss', color='red')
+    plt.title(f'Loss - {appliance_name}')
     plt.xlabel('Epoch')
-    plt.ylabel('Loss')
+    plt.ylabel('MSE Loss')
     plt.legend()
-    
-    plt.subplot(1, 2, 2)
-    val_mae = [metrics['mae'] for metrics in history['val_metrics']]
-    plt.plot(val_mae, label='Validation MAE')
-    plt.title(f'Validation MAE - {appliance_name}')
+    plt.grid(True, alpha=0.3)
+
+    # MAE
+    plt.subplot(2, 2, 2)
+    train_mae = [m['mae'] for m in history['train_metrics']]
+    val_mae = [m['mae'] for m in history['val_metrics']]
+    plt.plot(train_mae, label='Train MAE', color='blue')
+    plt.plot(val_mae, label='Val MAE', color='red')
+    plt.axhline(test_metrics['mae'], label='Test MAE', color='green', linestyle='--')
+    plt.title(f'MAE - {appliance_name}')
     plt.xlabel('Epoch')
     plt.ylabel('MAE')
     plt.legend()
-    
+    plt.grid(True, alpha=0.3)
+
+    # SAE
+    plt.subplot(2, 2, 3)
+    train_sae = [m['sae'] for m in history['train_metrics']]
+    val_sae = [m['sae'] for m in history['val_metrics']]
+    plt.plot(train_sae, label='Train SAE', color='blue')
+    plt.plot(val_sae, label='Val SAE', color='red')
+    plt.axhline(test_metrics['sae'], label='Test SAE', color='green', linestyle='--')
+    plt.title(f'SAE - {appliance_name}')
+    plt.xlabel('Epoch')
+    plt.ylabel('SAE')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    # F1
+    plt.subplot(2, 2, 4)
+    train_f1 = [m['f1'] for m in history['train_metrics']]
+    val_f1 = [m['f1'] for m in history['val_metrics']]
+    plt.plot(train_f1, label='Train F1', color='blue')
+    plt.plot(val_f1, label='Val F1', color='red')
+    plt.axhline(test_metrics['f1'], label='Test F1', color='green', linestyle='--')
+    plt.title(f'F1 Score - {appliance_name}')
+    plt.xlabel('Epoch')
+    plt.ylabel('F1')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
     plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, f"{model_name}_redd_{appliance_name.replace(' ', '_')}_training_history.png"))
+    plt.savefig(os.path.join(save_dir, f"{model_name}_redd_{appliance_name.replace(' ', '_')}_metrics.png"), dpi=300, bbox_inches='tight')
     plt.close()
     
     # Plot some prediction examples
@@ -448,7 +494,7 @@ def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_
     return model, history, test_metrics
 
 def test_liquidnn_on_all_redd_appliances(window_size=100, hidden_size=128, num_layers=2, dt=0.1,
-                                       advanced=True, epochs=50, lr=0.001, patience=10):
+                                       advanced=True, epochs=20, lr=0.001, patience=10):
     """
     Test Liquid Neural Network model on all specified REDD appliances with the exact splits you mentioned
     
@@ -595,7 +641,7 @@ if __name__ == "__main__":
         num_layers=2,
         dt=0.1,
         advanced=False,
-        epochs=50,
+        epochs=20,
         lr=0.001,
         patience=10
     )
@@ -617,7 +663,7 @@ if __name__ == "__main__":
         num_layers=2,
         dt=0.1,
         advanced=True,
-        epochs=50,
+        epochs=20,
         lr=0.001,
         patience=10
     )
