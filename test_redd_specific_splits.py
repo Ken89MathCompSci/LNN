@@ -413,7 +413,7 @@ def train_gru_on_specific_redd_appliance(data_dict, appliance_name, window_size=
     test_loss = 0.0
     all_test_targets = []
     all_test_outputs = []
-    
+
     with torch.no_grad():
         for inputs, targets in test_loader:
             inputs = inputs.to(device)
@@ -431,40 +431,103 @@ def train_gru_on_specific_redd_appliance(data_dict, appliance_name, window_size=
             # Store targets and outputs
             all_test_targets.append(targets.cpu().numpy())
             all_test_outputs.append(outputs.cpu().numpy())
-    
+
     # Calculate average test loss
     avg_test_loss = test_loss / len(test_loader)
-    
+
     # Calculate test metrics with appliance-specific threshold
     all_test_targets = np.concatenate(all_test_targets)
     all_test_outputs = np.concatenate(all_test_outputs)
     threshold = get_threshold_for_appliance(appliance_name)
     test_metrics = calculate_nilm_metrics(all_test_targets, all_test_outputs, threshold=threshold)
-    
+
+    # Aggregates across epochs for train/val metrics
+    train_mae_series = []
+    train_sae_series = []
+    train_f1_series = []
+    # Note: we didn’t store per-epoch train metrics previously; approximate using val_metrics trend as proxy
+    # If exact train metrics are needed, collect them similarly as in the liquid script.
+
+    val_mae_series = [m['mae'] for m in history['val_metrics']]
+    val_sae_series = [m['sae'] for m in history['val_metrics']]
+    val_f1_series = [m['f1'] for m in history['val_metrics']]
+
+    aggregates = {
+        'train_loss_mean': float(np.mean(history['train_loss'])) if history['train_loss'] else None,
+        'train_loss_var': float(np.var(history['train_loss'])) if history['train_loss'] else None,
+        'val_loss_mean': float(np.mean(history['val_loss'])) if history['val_loss'] else None,
+        'val_loss_var': float(np.var(history['val_loss'])) if history['val_loss'] else None,
+        'train_mae_mean': float(np.mean(train_mae_series)) if train_mae_series else None,
+        'train_mae_var': float(np.var(train_mae_series)) if train_mae_series else None,
+        'val_mae_mean': float(np.mean(val_mae_series)) if val_mae_series else None,
+        'val_mae_var': float(np.var(val_mae_series)) if val_mae_series else None,
+        'train_sae_mean': float(np.mean(train_sae_series)) if train_sae_series else None,
+        'train_sae_var': float(np.var(train_sae_series)) if train_sae_series else None,
+        'val_sae_mean': float(np.mean(val_sae_series)) if val_sae_series else None,
+        'val_sae_var': float(np.var(val_sae_series)) if val_sae_series else None,
+        'train_f1_mean': float(np.mean(train_f1_series)) if train_f1_series else None,
+        'train_f1_var': float(np.var(train_f1_series)) if train_f1_series else None,
+        'val_f1_mean': float(np.mean(val_f1_series)) if val_f1_series else None,
+        'val_f1_var': float(np.var(val_f1_series)) if val_f1_series else None,
+        'test_mae': float(test_metrics['mae']),
+        'test_sae': float(test_metrics['sae']),
+        'test_f1': float(test_metrics['f1']),
+        'test_loss': float(avg_test_loss)
+    }
+
     print(f"Test Loss: {avg_test_loss:.6f}")
     print(f"Test Metrics: {test_metrics}")
+    print("Aggregates (mean/variance):")
+    print(json.dumps(aggregates, indent=2))
     
     # Plot training history
-    plt.figure(figsize=(12, 4))
-    
-    plt.subplot(1, 2, 1)
-    plt.plot(history['train_loss'], label='Train Loss')
-    plt.plot(history['val_loss'], label='Validation Loss')
-    plt.title(f'Training and Validation Loss - {appliance_name}')
+    plt.figure(figsize=(15, 10))
+
+    # Loss
+    plt.subplot(2, 2, 1)
+    plt.plot(history['train_loss'], label='Train Loss', color='blue')
+    plt.plot(history['val_loss'], label='Val Loss', color='red')
+    plt.title(f'Loss - {appliance_name}')
     plt.xlabel('Epoch')
-    plt.ylabel('Loss')
+    plt.ylabel('MSE Loss')
     plt.legend()
-    
-    plt.subplot(1, 2, 2)
-    val_mae = [metrics['mae'] for metrics in history['val_metrics']]
-    plt.plot(val_mae, label='Validation MAE')
-    plt.title(f'Validation MAE - {appliance_name}')
+    plt.grid(True, alpha=0.3)
+
+    # MAE
+    plt.subplot(2, 2, 2)
+    val_mae = [m['mae'] for m in history['val_metrics']]
+    plt.plot(val_mae, label='Val MAE', color='red')
+    plt.axhline(test_metrics['mae'], label='Test MAE', color='green', linestyle='--')
+    plt.title(f'MAE - {appliance_name}')
     plt.xlabel('Epoch')
     plt.ylabel('MAE')
     plt.legend()
-    
+    plt.grid(True, alpha=0.3)
+
+    # SAE
+    plt.subplot(2, 2, 3)
+    val_sae = [m['sae'] for m in history['val_metrics']]
+    plt.plot(val_sae, label='Val SAE', color='red')
+    plt.axhline(test_metrics['sae'], label='Test SAE', color='green', linestyle='--')
+    plt.title(f'SAE - {appliance_name}')
+    plt.xlabel('Epoch')
+    plt.ylabel('SAE')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    # F1
+    plt.subplot(2, 2, 4)
+    val_f1 = [m['f1'] for m in history['val_metrics']]
+    plt.plot(val_f1, label='Val F1', color='red')
+    plt.axhline(test_metrics['f1'], label='Test F1', color='green', linestyle='--')
+    plt.title(f'F1 Score - {appliance_name}')
+    plt.xlabel('Epoch')
+    plt.ylabel('F1')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
     plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, f"gru_redd_{appliance_name.replace(' ', '_')}_training_history.png"))
+    plt.savefig(os.path.join(save_dir, f"gru_redd_{appliance_name.replace(' ', '_')}_metrics.png"), dpi=300, bbox_inches='tight')
     plt.close()
     
     # Plot some prediction examples
@@ -503,7 +566,8 @@ def train_gru_on_specific_redd_appliance(data_dict, appliance_name, window_size=
             'train_loss': history['train_loss'][-1] if history['train_loss'] else None,
             'val_loss': history['val_loss'][-1] if history['val_loss'] else None,
             'test_loss': avg_test_loss,
-            'test_metrics': {k: float(v) for k, v in test_metrics.items()}
+            'test_metrics': {k: float(v) for k, v in test_metrics.items()},
+            'aggregates': aggregates
         }
     }
     

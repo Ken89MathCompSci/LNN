@@ -1,0 +1,109 @@
+{
+    "timestamp": "20260209_145904",
+    "model_type": "liquid",
+    "dataset_splits": {
+        "training": {
+            "house": 3,
+            "time_start": "2011-04-21 19:41:24",
+            "time_end": "2011-04-22 19:41:21"
+        },
+        "validation": {
+            "house": 3,
+            "time_start": "2011-05-23 10:31:24",
+            "time_end": "2011-05-24 10:31:21"
+        },
+        "testing": {
+            "house": 1,
+            "time_start": "2011-04-18 09:22:12",
+            "time_end": "2011-05-23 09:21:51"
+        }
+    },
+    "appliances": {
+        "dish washer": {
+            "on": 1143,
+            "off": 27657,
+            "total": 28800
+        },
+        "fridge": {
+            "on": 10471,
+            "off": 18329,
+            "total": 28800
+        },
+        "microwave": {
+            "on": 531,
+            "off": 28269,
+            "total": 28800
+        },
+        "washer dryer": {
+            "on": 1879,
+            "off": 26921,
+            "total": 28800
+        }
+    },
+    "window_size": 100,
+    "model_params": {
+        "hidden_size": 128,
+        "num_layers": 2,
+        "dt": 0.1,
+        "advanced": false
+    },
+    "train_params": {
+        "epochs": 20,
+        "lr": 0.001,
+        "patience": 10
+    },
+    "results": {
+        "dish washer": {
+            "model_path": "models/liquid_redd_specific_test_20260209_145904\\dish_washer\\liquid_redd_dish_washer_best.pth",
+            "final_metrics": {
+                "mae": 42.44957733154297,
+                "rmse": 174.74365234375,
+                "nete": 0.6891099810600281,
+                "sae": 41.9787483215332,
+                "traditional_sae": 0.1282532532532532,
+                "precision": 0.28815977175463625,
+                "recall": 0.9373549883990719,
+                "f1": 0.4408074195308238
+            }
+        },
+        "fridge": {
+            "model_path": "models/liquid_redd_specific_test_20260209_145904\\fridge\\liquid_redd_fridge_best.pth",
+            "final_metrics": {
+                "mae": 58.116546630859375,
+                "rmse": 79.8991470336914,
+                "nete": 0.23776468634605408,
+                "sae": 41.25762939453125,
+                "traditional_sae": 0.7501251251251251,
+                "precision": 0.24987487487487486,
+                "recall": 1.0,
+                "f1": 0.3998398238061868
+            }
+        },
+        "microwave": {
+            "model_path": "models/liquid_redd_specific_test_20260209_145904\\microwave\\liquid_redd_microwave_best.pth",
+            "final_metrics": {
+                "mae": 28.968149185180664,
+                "rmse": 180.27261352539062,
+                "nete": 0.5776594877243042,
+                "sae": 24.558740615844727,
+                "traditional_sae": 0.4338088088088088,
+                "precision": 0.037047353760445684,
+                "recall": 0.9300699300699301,
+                "f1": 0.07125636217519421
+            }
+        },
+        "washer dryer": {
+            "model_path": "models/liquid_redd_specific_test_20260209_145904\\washer_dryer\\liquid_redd_washer_dryer_best.pth",
+            "final_metrics": {
+                "mae": 79.81041717529297,
+                "rmse": 102.72200012207031,
+                "nete": 1492.0347900390625,
+                "sae": 79.88519287109375,
+                "traditional_sae": 0.9557057057057057,
+                "precision": 0.044294294294294295,
+                "recall": 1.0,
+                "f1": 0.08483105679367361
+            }
+        }
+    }
+}

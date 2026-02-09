@@ -1,0 +1,54 @@
+{
+    "appliance": "washer dryer",
+    "window_size": 100,
+    "model_params": {
+        "input_size": 1,
+        "output_size": 1,
+        "hidden_size": 128,
+        "num_layers": 1,
+        "dt": 0.1,
+        "advanced": false
+    },
+    "train_params": {
+        "lr": 0.001,
+        "epochs": 20,
+        "patience": 10
+    },
+    "final_metrics": {
+        "train_loss": 514146.50494791666,
+        "val_loss": 1138680.8311598036,
+        "test_loss": 7819.6769921875,
+        "test_metrics": {
+            "mae": 66.95731353759766,
+            "rmse": 88.4422836303711,
+            "nete": 1251.7493896484375,
+            "sae": 67.0002212524414,
+            "traditional_sae": 0.9557057057057057,
+            "precision": 0.044294294294294295,
+            "recall": 1.0,
+            "f1": 0.08483105679367361
+        },
+        "aggregates": {
+            "train_loss_mean": 543722.2078929519,
+            "train_loss_var": 482124129.3066112,
+            "val_loss_mean": 1194478.2484740107,
+            "val_loss_var": 2830925640.9826,
+            "train_mae_mean": 202.41468811035156,
+            "train_mae_var": 441.037353515625,
+            "val_mae_mean": 337.9208984375,
+            "val_mae_var": 102.7459945678711,
+            "train_sae_mean": 68.23418426513672,
+            "train_sae_var": 425.59210205078125,
+            "val_sae_mean": 330.44842529296875,
+            "val_sae_var": 122.82356262207031,
+            "train_f1_mean": 0.13424345847554037,
+            "train_f1_var": 7.703719777548943e-34,
+            "val_f1_mean": 0.324087591240876,
+            "val_f1_var": 3.0814879110195774e-33,
+            "test_mae": 66.95731353759766,
+            "test_sae": 67.0002212524414,
+            "test_f1": 0.08483105679367361,
+            "test_loss": 7819.6769921875
+        }
+    }
+}

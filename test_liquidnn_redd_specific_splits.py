@@ -27,11 +27,27 @@ def get_threshold_for_appliance(appliance_name):
     Returns:
         Power threshold in watts
     """
-    # Washer dryer has very low power consumption (max 4W)
+    # Base thresholds (can be overridden by sweep)
     if appliance_name == 'washer dryer':
         return 0.5  # Very low threshold for washer dryer
     else:
         return 10.0  # Standard threshold for other appliances
+
+
+def find_best_threshold(y_true, y_pred, appliance_name, start=0.1, stop=1.0, step=0.1):
+    """
+    Sweep thresholds to maximize F1 on given targets/preds.
+    """
+    best_f1 = -1.0
+    best_threshold = get_threshold_for_appliance(appliance_name)
+    t = start
+    while t <= stop + 1e-9:
+        metrics = calculate_nilm_metrics(y_true, y_pred, threshold=t)
+        if metrics['f1'] > best_f1:
+            best_f1 = metrics['f1']
+            best_threshold = t
+        t = round(t + step, 10)
+    return best_threshold, best_f1
 
 class REDDSpecificDataset(torch.utils.data.Dataset):
     """
@@ -385,11 +401,53 @@ def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_
     # Calculate test metrics
     all_test_targets = np.concatenate(all_test_targets)
     all_test_outputs = np.concatenate(all_test_outputs)
-    threshold = get_threshold_for_appliance(appliance_name)
+
+    # Find best threshold on validation outputs (F1) if washer dryer
+    if appliance_name == 'washer dryer':
+        best_thresh, best_f1 = find_best_threshold(all_targets, all_outputs, appliance_name, start=0.1, stop=1.0, step=0.1)
+        print(f"Washer dryer best val threshold: {best_thresh:.3f} (val F1={best_f1:.4f})")
+        threshold = best_thresh
+    else:
+        threshold = get_threshold_for_appliance(appliance_name)
+
     test_metrics = calculate_nilm_metrics(all_test_targets, all_test_outputs, threshold=threshold)
     
     print(f"Test Loss: {avg_test_loss:.6f}")
     print(f"Test Metrics: {test_metrics}")
+
+    # Aggregate means/variances for train/val metrics
+    train_mae_series = [m['mae'] for m in history['train_metrics']]
+    val_mae_series = [m['mae'] for m in history['val_metrics']]
+    train_sae_series = [m['sae'] for m in history['train_metrics']]
+    val_sae_series = [m['sae'] for m in history['val_metrics']]
+    train_f1_series = [m['f1'] for m in history['train_metrics']]
+    val_f1_series = [m['f1'] for m in history['val_metrics']]
+
+    aggregates = {
+        'train_loss_mean': float(np.mean(history['train_loss'])) if history['train_loss'] else None,
+        'train_loss_var': float(np.var(history['train_loss'])) if history['train_loss'] else None,
+        'val_loss_mean': float(np.mean(history['val_loss'])) if history['val_loss'] else None,
+        'val_loss_var': float(np.var(history['val_loss'])) if history['val_loss'] else None,
+        'train_mae_mean': float(np.mean(train_mae_series)) if train_mae_series else None,
+        'train_mae_var': float(np.var(train_mae_series)) if train_mae_series else None,
+        'val_mae_mean': float(np.mean(val_mae_series)) if val_mae_series else None,
+        'val_mae_var': float(np.var(val_mae_series)) if val_mae_series else None,
+        'train_sae_mean': float(np.mean(train_sae_series)) if train_sae_series else None,
+        'train_sae_var': float(np.var(train_sae_series)) if train_sae_series else None,
+        'val_sae_mean': float(np.mean(val_sae_series)) if val_sae_series else None,
+        'val_sae_var': float(np.var(val_sae_series)) if val_sae_series else None,
+        'train_f1_mean': float(np.mean(train_f1_series)) if train_f1_series else None,
+        'train_f1_var': float(np.var(train_f1_series)) if train_f1_series else None,
+        'val_f1_mean': float(np.mean(val_f1_series)) if val_f1_series else None,
+        'val_f1_var': float(np.var(val_f1_series)) if val_f1_series else None,
+        'test_mae': float(test_metrics['mae']),
+        'test_sae': float(test_metrics['sae']),
+        'test_f1': float(test_metrics['f1']),
+        'test_loss': float(avg_test_loss)
+    }
+
+    print("Aggregates (mean/variance):")
+    print(json.dumps(aggregates, indent=2))
     
     # Plot metrics (loss, MAE, SAE, F1)
     plt.figure(figsize=(15, 10))
@@ -484,7 +542,8 @@ def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_
             'train_loss': history['train_loss'][-1] if history['train_loss'] else None,
             'val_loss': history['val_loss'][-1] if history['val_loss'] else None,
             'test_loss': avg_test_loss,
-            'test_metrics': {k: float(v) for k, v in test_metrics.items()}
+            'test_metrics': {k: float(v) for k, v in test_metrics.items()},
+            'aggregates': aggregates
         }
     }
     
@@ -527,6 +586,11 @@ def test_liquidnn_on_all_redd_appliances(window_size=100, hidden_size=128, num_l
     appliances = ['dish washer', 'fridge', 'microwave', 'washer dryer']
     
     for appliance_name in appliances:
+        appliance_window = window_size
+        appliance_epochs = epochs
+        appliance_lr = lr
+        appliance_advanced = advanced
+
         print(f"\n{'='*60}")
         print(f"Testing {model_type} on {appliance_name}")
         print(f"{'='*60}\n")
@@ -540,14 +604,14 @@ def test_liquidnn_on_all_redd_appliances(window_size=100, hidden_size=128, num_l
             model, history, test_metrics = train_liquidnn_on_specific_redd_appliance(
                 data_dict,
                 appliance_name=appliance_name,
-                window_size=window_size,
-                hidden_size=hidden_size,
-                num_layers=num_layers,
-                dt=dt,
-                advanced=advanced,
-                epochs=epochs,
-                lr=lr,
-                patience=patience,
+                    window_size=appliance_window,
+                    hidden_size=hidden_size,
+                    num_layers=num_layers,
+                    dt=dt,
+                    advanced=appliance_advanced,
+                    epochs=appliance_epochs,
+                    lr=appliance_lr,
+                    patience=patience,
                 save_dir=appliance_dir
             )
             

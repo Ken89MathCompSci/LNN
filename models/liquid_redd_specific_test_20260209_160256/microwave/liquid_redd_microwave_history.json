@@ -1,0 +1,54 @@
+{
+    "appliance": "microwave",
+    "window_size": 100,
+    "model_params": {
+        "input_size": 1,
+        "output_size": 1,
+        "hidden_size": 128,
+        "num_layers": 1,
+        "dt": 0.1,
+        "advanced": false
+    },
+    "train_params": {
+        "lr": 0.001,
+        "epochs": 20,
+        "patience": 10
+    },
+    "final_metrics": {
+        "train_loss": 13827.22610282898,
+        "val_loss": 28606.339878624014,
+        "test_loss": 32459.32163768856,
+        "test_metrics": {
+            "mae": 29.07033348083496,
+            "rmse": 180.25372314453125,
+            "nete": 0.569144606590271,
+            "sae": 24.67465591430664,
+            "traditional_sae": 0.46846846846846846,
+            "precision": 0.03439358675976209,
+            "recall": 0.9300699300699301,
+            "f1": 0.06633416458852869
+        },
+        "aggregates": {
+            "train_loss_mean": 13850.962279893316,
+            "train_loss_var": 1371.6521968560257,
+            "val_loss_mean": 28716.780706688995,
+            "val_loss_var": 11354.673660505017,
+            "train_mae_mean": 18.95819664001465,
+            "train_mae_var": 1.8638166189193726,
+            "val_mae_mean": 27.504756927490234,
+            "val_mae_var": 1.4899673461914062,
+            "train_sae_mean": 9.856241226196289,
+            "train_sae_var": 0.21478816866874695,
+            "val_sae_mean": 25.702987670898438,
+            "val_sae_var": 0.8136028051376343,
+            "train_f1_mean": 0.06099214992974844,
+            "train_f1_var": 0.00021964879581745216,
+            "val_f1_mean": 0.039788752990886536,
+            "val_f1_var": 0.00012365970596290907,
+            "test_mae": 29.07033348083496,
+            "test_sae": 24.67465591430664,
+            "test_f1": 0.06633416458852869,
+            "test_loss": 32459.32163768856
+        }
+    }
+}
