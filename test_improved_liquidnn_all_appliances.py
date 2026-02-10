@@ -13,8 +13,8 @@ from train_improved_liquidnn import (
 
 
 def test_improved_liquidnn_on_all_appliances(window_size=100, hidden_size=256, num_layers=3,
-                                            dt=0.1, advanced=True, epochs=50, lr=0.001,
-                                            patience=15, use_augmentation=True,
+                                            dt=0.1, advanced=True, epochs=20, lr=0.001,
+                                            patience=10, use_augmentation=True,
                                             use_lr_scheduler=True, gradient_clip=1.0):
     """
     Test Improved Liquid Neural Network on all REDD appliances
@@ -25,9 +25,9 @@ def test_improved_liquidnn_on_all_appliances(window_size=100, hidden_size=256, n
         num_layers: Number of liquid layers (increased to 3)
         dt: Time step for liquid dynamics
         advanced: Whether to use advanced model
-        epochs: Number of training epochs (increased to 50)
+        epochs: Number of training epochs (20 for faster training)
         lr: Learning rate
-        patience: Early stopping patience (increased to 15)
+        patience: Early stopping patience (10)
         use_augmentation: Whether to use data augmentation
         use_lr_scheduler: Whether to use learning rate scheduling
         gradient_clip: Gradient clipping value
@@ -39,12 +39,12 @@ def test_improved_liquidnn_on_all_appliances(window_size=100, hidden_size=256, n
     print("Testing Improved Liquid Neural Network on All REDD Appliances")
     print("=" * 70)
     print(f"\nImprovements:")
-    print(f"  ✅ Data Augmentation (noise, scaling, time shift)")
+    print(f"  ✅ Data Augmentation (vertical/horizontal scaling, noise)")
     print(f"  ✅ Better Normalization (per-dataset statistics)")
     print(f"  ✅ Increased Model Capacity ({hidden_size} hidden size, {num_layers} layers)")
     print(f"  ✅ Learning Rate Scheduling (ReduceLROnPlateau)")
     print(f"  ✅ Gradient Clipping ({gradient_clip})")
-    print(f"  ✅ Longer Training ({epochs} epochs, patience {patience})")
+    print(f"  ✅ Training ({epochs} epochs, patience {patience})")
     print(f"  ✅ Weight Decay (L2 regularization)")
     print("=" * 70)
 
@@ -115,12 +115,12 @@ def test_improved_liquidnn_on_all_appliances(window_size=100, hidden_size=256, n
         'timestamp': timestamp,
         'model_type': model_type,
         'improvements': [
-            'Data augmentation (noise, scaling, time shift)',
+            'Advanced data augmentation (vertical/horizontal scaling, noise)',
             'Better normalization (dataset statistics)',
             'Increased model capacity (256 hidden, 3 layers)',
             'Learning rate scheduling (ReduceLROnPlateau)',
             'Gradient clipping (1.0)',
-            'Longer training (50 epochs, patience 15)',
+            'Training configuration (20 epochs, patience 10)',
             'Weight decay (L2 regularization)'
         ],
         'dataset_splits': {
@@ -201,9 +201,9 @@ if __name__ == "__main__":
         num_layers=3,            # Increased from 2
         dt=0.1,
         advanced=True,
-        epochs=50,               # Increased from 20
+        epochs=20,               # Fast training (20 instead of 50)
         lr=0.001,
-        patience=15,             # Increased from 10
+        patience=10,             # Early stopping patience
         use_augmentation=True,   # NEW: Data augmentation
         use_lr_scheduler=True,   # NEW: LR scheduling
         gradient_clip=1.0        # NEW: Gradient clipping
@@ -217,6 +217,7 @@ if __name__ == "__main__":
     print("\n📈 Expected Improvements vs Standard LNN:")
     print("  Standard LNN (dish washer): F1 = 0.42")
     print("  Improved LNN (expected):    F1 = 0.45-0.55 (+7-31%)")
+    print("\nExpected runtime: ~20-30 minutes with GPU, ~2-3 hours with CPU")
     print("\nKey improvements:")
     print("  - Data augmentation makes model more robust")
     print("  - Better normalization improves convergence")
