@@ -40,7 +40,11 @@ class REDDCausalDataset(torch.utils.data.Dataset):
         # Detect causal events in targets
         self.events = None
         if detect_events:
-            self.events = detect_causal_events(self.y.squeeze(), threshold=event_threshold)
+            events_tensor = detect_causal_events(self.y.squeeze(), threshold=event_threshold)
+            # Squeeze to remove batch dimension if present
+            if events_tensor.dim() > 1:
+                events_tensor = events_tensor.squeeze(0)
+            self.events = events_tensor
 
     def __len__(self):
         return len(self.X)
