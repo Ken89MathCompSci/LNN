@@ -389,8 +389,9 @@ def train_improved_liquidnn(data_dict, appliance_name, window_size=100,
     scheduler = None
     if use_lr_scheduler:
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=5, verbose=True
+            optimizer, mode='min', factor=0.5, patience=5
         )
+        print("Learning rate scheduler: ReduceLROnPlateau (factor=0.5, patience=5)")
 
     # Training history
     history = {
