@@ -1,0 +1,71 @@
+{
+    "appliance": "dish washer",
+    "window_size": 100,
+    "model_params": {
+        "input_size": 1,
+        "output_size": 1,
+        "hidden_size": 128,
+        "num_layers": 1,
+        "dt": 0.1,
+        "advanced": false
+    },
+    "train_params": {
+        "lr": 0.001,
+        "epochs": 20,
+        "patience": 10,
+        "iterations_per_epoch": null,
+        "seed": 44
+    },
+    "final_metrics": {
+        "train_loss": 13350.162022060818,
+        "val_loss": 12335.695050266055,
+        "test_loss": 29969.735062171934,
+        "test_metrics": {
+            "mae": 43.02273178100586,
+            "rmse": 173.19903564453125,
+            "nete": 0.6472061276435852,
+            "sae": 42.39847183227539,
+            "traditional_sae": 0.14451951951951947,
+            "precision": 0.26277850589777196,
+            "recall": 0.9303944315545244,
+            "f1": 0.4098109351047522
+        },
+        "aggregates": {
+            "train_loss_mean": 13845.797934319246,
+            "train_loss_var": 325518.0625543229,
+            "val_loss_mean": 12824.524503313369,
+            "val_loss_var": 243116.60591342143,
+            "train_mae_mean": 37.953853607177734,
+            "train_mae_var": 7.35915470123291,
+            "val_mae_mean": 40.19929504394531,
+            "val_mae_var": 6.865044593811035,
+            "train_sae_mean": 9.845646858215332,
+            "train_sae_var": 4.350822448730469,
+            "val_sae_mean": 38.56962203979492,
+            "val_sae_var": 5.554014682769775,
+            "train_f1_mean": 0.1764936155613466,
+            "train_f1_var": 0.0032261510324733548,
+            "val_f1_mean": 0.1519442390070063,
+            "val_f1_var": 0.0014851028902410752,
+            "test_mae": 43.02273178100586,
+            "test_sae": 42.39847183227539,
+            "test_f1": 0.4098109351047522,
+            "test_loss": 29969.735062171934
+        },
+        "best": {
+            "epoch": 16,
+            "val_loss": 12315.876094167763,
+            "val_metrics": {
+                "mae": 36.75922393798828,
+                "rmse": 111.16998291015625,
+                "nete": 0.05820813030004501,
+                "sae": 35.32227325439453,
+                "traditional_sae": 0.3517421602787456,
+                "precision": 0.09594594594594595,
+                "recall": 0.9466666666666667,
+                "f1": 0.17423312883435582
+            },
+            "model_path": "models/liquid_redd_specific_test_20260210_225620\\dish_washer\\run_3\\liquid_redd_dish_washer_best.pth"
+        }
+    }
+}

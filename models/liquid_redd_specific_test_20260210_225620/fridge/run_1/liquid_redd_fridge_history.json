@@ -1,0 +1,71 @@
+{
+    "appliance": "fridge",
+    "window_size": 100,
+    "model_params": {
+        "input_size": 1,
+        "output_size": 1,
+        "hidden_size": 128,
+        "num_layers": 1,
+        "dt": 0.1,
+        "advanced": false
+    },
+    "train_params": {
+        "lr": 0.001,
+        "epochs": 20,
+        "patience": 10,
+        "iterations_per_epoch": null,
+        "seed": 42
+    },
+    "final_metrics": {
+        "train_loss": 4328.243629964193,
+        "val_loss": 4826.421122572157,
+        "test_loss": 6005.529166381836,
+        "test_metrics": {
+            "mae": 55.803436279296875,
+            "rmse": 77.44725036621094,
+            "nete": 0.21565908193588257,
+            "sae": 39.87710952758789,
+            "traditional_sae": 0.7501251251251251,
+            "precision": 0.24987487487487486,
+            "recall": 1.0,
+            "f1": 0.3998398238061868
+        },
+        "aggregates": {
+            "train_loss_mean": 4744.893558044434,
+            "train_loss_var": 302756.11035242194,
+            "val_loss_mean": 5211.2278806813565,
+            "val_loss_var": 118672.60630551018,
+            "train_mae_mean": 53.47411346435547,
+            "train_mae_var": 7.10750675201416,
+            "val_mae_mean": 56.0315055847168,
+            "val_mae_var": 5.802581787109375,
+            "train_sae_mean": 7.397921562194824,
+            "train_sae_var": 52.75849151611328,
+            "val_sae_mean": 20.09165382385254,
+            "val_sae_var": 10.32733154296875,
+            "train_f1_mean": 0.5299952579169565,
+            "train_f1_var": 0.0004016105779469254,
+            "val_f1_mean": 0.564820602575322,
+            "val_f1_var": 0.0,
+            "test_mae": 55.803436279296875,
+            "test_sae": 39.87710952758789,
+            "test_f1": 0.3998398238061868,
+            "test_loss": 6005.529166381836
+        },
+        "best": {
+            "epoch": 19,
+            "val_loss": 4826.421122572157,
+            "val_metrics": {
+                "mae": 51.87812423706055,
+                "rmse": 69.44786834716797,
+                "nete": 0.024353576824069023,
+                "sae": 20.82489585876465,
+                "traditional_sae": 0.6064459930313588,
+                "precision": 0.3935540069686411,
+                "recall": 1.0,
+                "f1": 0.564820602575322
+            },
+            "model_path": "models/liquid_redd_specific_test_20260210_225620\\fridge\\run_1\\liquid_redd_fridge_best.pth"
+        }
+    }
+}

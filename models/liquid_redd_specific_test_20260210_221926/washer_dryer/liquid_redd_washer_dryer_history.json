@@ -1,0 +1,69 @@
+{
+    "appliance": "washer dryer",
+    "window_size": 100,
+    "model_params": {
+        "input_size": 1,
+        "output_size": 1,
+        "hidden_size": 128,
+        "num_layers": 1,
+        "dt": 0.1,
+        "advanced": false
+    },
+    "train_params": {
+        "lr": 0.001,
+        "epochs": 20,
+        "patience": 10
+    },
+    "final_metrics": {
+        "train_loss": 514216.2500135634,
+        "val_loss": 1141143.8899902343,
+        "test_loss": 8324.556950195312,
+        "test_metrics": {
+            "mae": 74.1673812866211,
+            "rmse": 91.25753021240234,
+            "nete": 1386.5396728515625,
+            "sae": 74.26630401611328,
+            "traditional_sae": 0.9557057057057057,
+            "precision": 0.044294294294294295,
+            "recall": 1.0,
+            "f1": 0.08483105679367361
+        },
+        "aggregates": {
+            "train_loss_mean": 544903.6216682517,
+            "train_loss_var": 457650809.29417515,
+            "val_loss_mean": 1197056.7996923288,
+            "val_loss_var": 2846228096.395993,
+            "train_mae_mean": 203.38189697265625,
+            "train_mae_var": 435.6763610839844,
+            "val_mae_mean": 341.02587890625,
+            "val_mae_var": 127.84175109863281,
+            "train_sae_mean": 70.13578796386719,
+            "train_sae_var": 378.33026123046875,
+            "val_sae_mean": 333.6103210449219,
+            "val_sae_var": 151.69007873535156,
+            "train_f1_mean": 0.13424345847554037,
+            "train_f1_var": 7.703719777548943e-34,
+            "val_f1_mean": 0.324087591240876,
+            "val_f1_var": 3.0814879110195774e-33,
+            "test_mae": 74.1673812866211,
+            "test_sae": 74.26630401611328,
+            "test_f1": 0.08483105679367361,
+            "test_loss": 8324.556950195312
+        },
+        "best": {
+            "epoch": 18,
+            "val_loss": 1127334.0197916667,
+            "val_metrics": {
+                "mae": 331.41644287109375,
+                "rmse": 1063.602783203125,
+                "nete": 0.5970552563667297,
+                "sae": 313.8226623535156,
+                "traditional_sae": 0.8066202090592335,
+                "precision": 0.19337979094076654,
+                "recall": 1.0,
+                "f1": 0.32408759124087594
+            },
+            "model_path": "models/liquid_redd_specific_test_20260210_221926\\washer_dryer\\liquid_redd_washer_dryer_best.pth"
+        }
+    }
+}

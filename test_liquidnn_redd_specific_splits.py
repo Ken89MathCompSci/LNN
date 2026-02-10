@@ -148,10 +148,11 @@ def create_sequences(data, window_size=100, target_size=1):
 
 def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_size=100,
                                             hidden_size=128, num_layers=2, dt=0.1, advanced=True,
-                                            epochs=20, lr=0.001, patience=10, save_dir='models/liquidnn_redd_specific'):
+                                            epochs=20, lr=0.001, patience=10, iterations_per_epoch=None,
+                                            seed=None, save_dir='models/liquidnn_redd_specific'):
     """
     Train Liquid Neural Network model on a specific REDD appliance with the exact splits you specified
-    
+
     Args:
         data_dict: Dictionary containing train, val, test data
         appliance_name: Name of the appliance to train on
@@ -163,14 +164,25 @@ def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_
         epochs: Number of training epochs
         lr: Learning rate
         patience: Early stopping patience
+        iterations_per_epoch: Maximum number of batches to process per epoch (None = use all batches)
+        seed: Random seed for reproducibility (None = no seed set)
         save_dir: Directory to save model and results
-    
+
     Returns:
         Trained model, training history, and evaluation metrics
     """
     # Create save directory if it doesn't exist
     os.makedirs(save_dir, exist_ok=True)
-    
+
+    # Set random seed for reproducibility
+    if seed is not None:
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
+        print(f"Random seed set to: {seed}")
+
     # Set device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
@@ -240,11 +252,14 @@ def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_
         'train_loss': [],
         'val_loss': [],
         'train_metrics': [],
-        'val_metrics': []
+        'val_metrics': [],
+        'best': None  # {'epoch': int, 'val_loss': float, 'val_metrics': dict, 'model_path': str}
     }
-    
+
     # Early stopping variables
     best_val_loss = float('inf')
+    best_epoch = None
+    best_metrics = None
     counter = 0
     best_model_path = None
     
@@ -257,25 +272,34 @@ def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_
         train_loss = 0.0
         train_targets = []
         train_outputs = []
-        
-        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
-        for inputs, targets in progress_bar:
+
+        # Determine total iterations for this epoch
+        total_iterations = len(train_loader)
+        max_iterations = iterations_per_epoch if iterations_per_epoch is not None else total_iterations
+        actual_iterations = min(max_iterations, total_iterations)
+
+        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs} ({actual_iterations}/{total_iterations} batches)", total=actual_iterations)
+        for batch_idx, (inputs, targets) in enumerate(progress_bar):
+            # Stop if we've reached the maximum iterations for this epoch
+            if iterations_per_epoch is not None and batch_idx >= iterations_per_epoch:
+                break
+
             inputs = inputs.to(device)
             targets = targets.to(device)
-            
+
             # Zero the gradients
             optimizer.zero_grad()
-            
+
             # Forward pass
             outputs = model(inputs)
-            
+
             # Calculate loss
             loss = criterion(outputs, targets)
-            
+
             # Backward pass and optimize
             loss.backward()
             optimizer.step()
-            
+
             # Update statistics
             train_loss += loss.item()
             progress_bar.set_postfix({'loss': loss.item()})
@@ -285,7 +309,8 @@ def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_
             train_outputs.append(outputs.detach().cpu().numpy())
         
         # Calculate average training loss
-        avg_train_loss = train_loss / len(train_loader)
+        num_train_batches = len(train_targets)
+        avg_train_loss = train_loss / num_train_batches if num_train_batches > 0 else 0.0
         history['train_loss'].append(avg_train_loss)
 
         # Training metrics
@@ -336,12 +361,14 @@ def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_
         # Early stopping check
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
+            best_epoch = epoch
+            best_metrics = metrics
             counter = 0
-            
+
             # Save best model
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             best_model_path = os.path.join(save_dir, f"{model_name}_redd_{appliance_name.replace(' ', '_')}_best.pth")
-            
+
             # Save model with metadata
             model_params = {
                 'input_size': input_size,
@@ -351,13 +378,13 @@ def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_
                 'dt': dt,
                 'advanced': advanced
             }
-            
+
             train_params = {
                 'lr': lr,
                 'epochs': epochs,
                 'patience': patience
             }
-            
+
             save_model(model, model_params, train_params, metrics, best_model_path)
             print(f"Model saved to {best_model_path}")
         else:
@@ -521,7 +548,14 @@ def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_
     plt.savefig(os.path.join(save_dir, f"{model_name}_redd_{appliance_name.replace(' ', '_')}_predictions.png"))
     plt.close()
     
-    # Save training history to JSON
+    # Save training history to JSON (include best epoch info)
+    history['best'] = {
+        'epoch': int(best_epoch) if best_epoch is not None else None,
+        'val_loss': float(best_val_loss) if best_epoch is not None else None,
+        'val_metrics': {k: float(v) for k, v in best_metrics.items()} if best_metrics is not None else None,
+        'model_path': best_model_path
+    }
+
     config = {
         'appliance': appliance_name,
         'window_size': window_size,
@@ -536,14 +570,17 @@ def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_
         'train_params': {
             'lr': lr,
             'epochs': epochs,
-            'patience': patience
+            'patience': patience,
+            'iterations_per_epoch': iterations_per_epoch,
+            'seed': seed
         },
         'final_metrics': {
             'train_loss': history['train_loss'][-1] if history['train_loss'] else None,
             'val_loss': history['val_loss'][-1] if history['val_loss'] else None,
             'test_loss': avg_test_loss,
             'test_metrics': {k: float(v) for k, v in test_metrics.items()},
-            'aggregates': aggregates
+            'aggregates': aggregates,
+            'best': history['best']
         }
     }
     
@@ -552,11 +589,158 @@ def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_
     
     return model, history, test_metrics
 
+def train_liquidnn_multiple_runs(data_dict, appliance_name, num_runs=5, window_size=100,
+                                 hidden_size=128, num_layers=2, dt=0.1, advanced=True,
+                                 epochs=20, lr=0.001, patience=10, iterations_per_epoch=None,
+                                 save_dir='models/liquidnn_redd_specific'):
+    """
+    Train Liquid Neural Network multiple times with different seeds and aggregate results
+
+    Args:
+        data_dict: Dictionary containing train, val, test data
+        appliance_name: Name of the appliance to train on
+        num_runs: Number of independent runs with different seeds
+        window_size: Size of input sequence window
+        hidden_size: Hidden dimension size for liquid network
+        num_layers: Number of liquid layers (for advanced model)
+        dt: Time step for liquid dynamics
+        advanced: Whether to use advanced liquid network model
+        epochs: Number of training epochs
+        lr: Learning rate
+        patience: Early stopping patience
+        iterations_per_epoch: Maximum number of batches to process per epoch (None = use all batches)
+        save_dir: Directory to save model and results
+
+    Returns:
+        best_model: Model from the run with best validation F1
+        aggregated_results: Dictionary with mean, std, min, max of metrics across runs
+        all_run_results: List of (model, history, test_metrics) from each run
+    """
+    print(f"\n{'='*70}")
+    print(f"Running {num_runs} independent training runs for {appliance_name}")
+    print(f"{'='*70}\n")
+
+    all_run_results = []
+    test_maes = []
+    test_f1s = []
+    test_saes = []
+    val_f1s = []
+
+    best_val_f1 = -1
+    best_model = None
+    best_history = None
+    best_test_metrics = None
+    best_run_idx = None
+
+    for run_idx in range(num_runs):
+        seed = 42 + run_idx  # Use different seeds: 42, 43, 44, ...
+        print(f"\n--- Run {run_idx + 1}/{num_runs} (seed={seed}) ---")
+
+        # Create run-specific save directory
+        run_save_dir = os.path.join(save_dir, f"run_{run_idx + 1}")
+
+        try:
+            model, history, test_metrics = train_liquidnn_on_specific_redd_appliance(
+                data_dict,
+                appliance_name=appliance_name,
+                window_size=window_size,
+                hidden_size=hidden_size,
+                num_layers=num_layers,
+                dt=dt,
+                advanced=advanced,
+                epochs=epochs,
+                lr=lr,
+                patience=patience,
+                iterations_per_epoch=iterations_per_epoch,
+                seed=seed,
+                save_dir=run_save_dir
+            )
+
+            # Store results
+            all_run_results.append((model, history, test_metrics))
+            test_maes.append(test_metrics['mae'])
+            test_f1s.append(test_metrics['f1'])
+            test_saes.append(test_metrics['sae'])
+
+            # Get validation F1 from history
+            if history.get('best') and history['best'].get('val_metrics'):
+                val_f1 = history['best']['val_metrics']['f1']
+            else:
+                # Fallback: use last validation F1
+                val_f1 = history['val_metrics'][-1]['f1'] if history['val_metrics'] else 0.0
+            val_f1s.append(val_f1)
+
+            print(f"Run {run_idx + 1} completed - Test F1: {test_metrics['f1']:.4f}, Val F1: {val_f1:.4f}")
+
+            # Track best model based on validation F1
+            if val_f1 > best_val_f1:
+                best_val_f1 = val_f1
+                best_model = model
+                best_history = history
+                best_test_metrics = test_metrics
+                best_run_idx = run_idx + 1
+
+        except Exception as e:
+            print(f"Run {run_idx + 1} failed with error: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            continue
+
+    # Aggregate results
+    aggregated_results = {
+        'num_runs': len(all_run_results),
+        'best_run': best_run_idx,
+        'test_mae': {
+            'mean': float(np.mean(test_maes)),
+            'std': float(np.std(test_maes)),
+            'min': float(np.min(test_maes)),
+            'max': float(np.max(test_maes)),
+            'best': float(best_test_metrics['mae']) if best_test_metrics else None
+        },
+        'test_f1': {
+            'mean': float(np.mean(test_f1s)),
+            'std': float(np.std(test_f1s)),
+            'min': float(np.min(test_f1s)),
+            'max': float(np.max(test_f1s)),
+            'best': float(best_test_metrics['f1']) if best_test_metrics else None
+        },
+        'test_sae': {
+            'mean': float(np.mean(test_saes)),
+            'std': float(np.std(test_saes)),
+            'min': float(np.min(test_saes)),
+            'max': float(np.max(test_saes)),
+            'best': float(best_test_metrics['sae']) if best_test_metrics else None
+        },
+        'val_f1': {
+            'mean': float(np.mean(val_f1s)),
+            'std': float(np.std(val_f1s)),
+            'min': float(np.min(val_f1s)),
+            'max': float(np.max(val_f1s)),
+            'best': float(best_val_f1)
+        }
+    }
+
+    print(f"\n{'='*70}")
+    print(f"Aggregated Results for {appliance_name} ({len(all_run_results)} runs)")
+    print(f"{'='*70}")
+    print(f"Test MAE:  {aggregated_results['test_mae']['mean']:.4f} ± {aggregated_results['test_mae']['std']:.4f}")
+    print(f"Test F1:   {aggregated_results['test_f1']['mean']:.4f} ± {aggregated_results['test_f1']['std']:.4f}")
+    print(f"Test SAE:  {aggregated_results['test_sae']['mean']:.4f} ± {aggregated_results['test_sae']['std']:.4f}")
+    print(f"Best Run:  #{best_run_idx} (Val F1: {best_val_f1:.4f}, Test F1: {best_test_metrics['f1']:.4f})")
+    print(f"{'='*70}\n")
+
+    # Save aggregated results
+    with open(os.path.join(save_dir, f'{appliance_name.replace(" ", "_")}_aggregated_results.json'), 'w') as f:
+        json.dump(aggregated_results, f, indent=4)
+
+    return best_model, best_history, best_test_metrics, aggregated_results, all_run_results
+
 def test_liquidnn_on_all_redd_appliances(window_size=100, hidden_size=128, num_layers=2, dt=0.1,
-                                       advanced=True, epochs=20, lr=0.001, patience=10):
+                                       advanced=True, epochs=20, lr=0.001, patience=10,
+                                       iterations_per_epoch_config=None, num_runs=1):
     """
     Test Liquid Neural Network model on all specified REDD appliances with the exact splits you mentioned
-    
+
     Args:
         window_size: Size of input sequence window
         hidden_size: Hidden dimension size for liquid network
@@ -566,7 +750,11 @@ def test_liquidnn_on_all_redd_appliances(window_size=100, hidden_size=128, num_l
         epochs: Number of training epochs
         lr: Learning rate
         patience: Early stopping patience
-    
+        iterations_per_epoch_config: Dict mapping appliance names to max iterations per epoch
+                                    (e.g., {'dish washer': 50, 'fridge': 100})
+                                    Use None for an appliance to train on all batches
+        num_runs: Number of independent runs with different seeds for each appliance (1 = single run)
+
     Returns:
         Dictionary of results for all appliances
     """
@@ -591,19 +779,32 @@ def test_liquidnn_on_all_redd_appliances(window_size=100, hidden_size=128, num_l
         appliance_lr = lr
         appliance_advanced = advanced
 
+        # Get appliance-specific iterations per epoch if configured
+        appliance_iterations = None
+        if iterations_per_epoch_config is not None and appliance_name in iterations_per_epoch_config:
+            appliance_iterations = iterations_per_epoch_config[appliance_name]
+
         print(f"\n{'='*60}")
         print(f"Testing {model_type} on {appliance_name}")
+        if appliance_iterations is not None:
+            print(f"Max iterations per epoch: {appliance_iterations}")
+        else:
+            print(f"Using all batches per epoch")
+        if num_runs > 1:
+            print(f"Number of runs: {num_runs}")
         print(f"{'='*60}\n")
-        
+
         # Create appliance-specific save directory
         appliance_dir = os.path.join(base_save_dir, appliance_name.replace(' ', '_'))
         os.makedirs(appliance_dir, exist_ok=True)
-        
+
         try:
-            # Train and evaluate Liquid Neural Network model
-            model, history, test_metrics = train_liquidnn_on_specific_redd_appliance(
-                data_dict,
-                appliance_name=appliance_name,
+            if num_runs > 1:
+                # Train with multiple runs
+                model, history, test_metrics, aggregated_results, all_runs = train_liquidnn_multiple_runs(
+                    data_dict,
+                    appliance_name=appliance_name,
+                    num_runs=num_runs,
                     window_size=appliance_window,
                     hidden_size=hidden_size,
                     num_layers=num_layers,
@@ -612,18 +813,52 @@ def test_liquidnn_on_all_redd_appliances(window_size=100, hidden_size=128, num_l
                     epochs=appliance_epochs,
                     lr=appliance_lr,
                     patience=patience,
-                save_dir=appliance_dir
-            )
-            
-            if model is not None:
-                # Store results
-                all_results[appliance_name] = {
-                    'model_path': os.path.join(appliance_dir, f"{model_type}_redd_{appliance_name.replace(' ', '_')}_best.pth"),
-                    'final_metrics': {k: float(v) for k, v in test_metrics.items()}
-                }
-                print(f"✅ Successfully tested {model_type} on {appliance_name}")
+                    iterations_per_epoch=appliance_iterations,
+                    save_dir=appliance_dir
+                )
+
+                if model is not None:
+                    # Store aggregated results
+                    all_results[appliance_name] = {
+                        'model_path': os.path.join(appliance_dir, f"run_{aggregated_results['best_run']}",
+                                                   f"{model_type}_redd_{appliance_name.replace(' ', '_')}_best.pth"),
+                        'final_metrics': {k: float(v) for k, v in test_metrics.items()},
+                        'aggregated_metrics': aggregated_results,
+                        'best_epoch': history.get('best', {}).get('epoch'),
+                        'num_runs': num_runs
+                    }
+                    print(f"✅ Successfully tested {model_type} on {appliance_name} ({num_runs} runs)")
+                else:
+                    print(f"❌ Failed to test {model_type} on {appliance_name}")
             else:
-                print(f"❌ Failed to test {model_type} on {appliance_name}")
+                # Single run (original behavior)
+                model, history, test_metrics = train_liquidnn_on_specific_redd_appliance(
+                    data_dict,
+                    appliance_name=appliance_name,
+                    window_size=appliance_window,
+                    hidden_size=hidden_size,
+                    num_layers=num_layers,
+                    dt=dt,
+                    advanced=appliance_advanced,
+                    epochs=appliance_epochs,
+                    lr=appliance_lr,
+                    patience=patience,
+                    iterations_per_epoch=appliance_iterations,
+                    seed=42,  # Use fixed seed for single run
+                    save_dir=appliance_dir
+                )
+
+                if model is not None:
+                    # Store results
+                    all_results[appliance_name] = {
+                        'model_path': os.path.join(appliance_dir, f"{model_type}_redd_{appliance_name.replace(' ', '_')}_best.pth"),
+                        'final_metrics': {k: float(v) for k, v in test_metrics.items()},
+                        'best_epoch': history.get('best', {}).get('epoch'),
+                        'num_runs': 1
+                    }
+                    print(f"✅ Successfully tested {model_type} on {appliance_name}")
+                else:
+                    print(f"❌ Failed to test {model_type} on {appliance_name}")
         
         except Exception as e:
             print(f"Error testing {model_type} on {appliance_name}: {str(e)}")
@@ -668,7 +903,9 @@ def test_liquidnn_on_all_redd_appliances(window_size=100, hidden_size=128, num_l
         'train_params': {
             'epochs': epochs,
             'lr': lr,
-            'patience': patience
+            'patience': patience,
+            'iterations_per_epoch_config': iterations_per_epoch_config,
+            'num_runs': num_runs
         },
         'results': all_results
     }
@@ -697,8 +934,28 @@ if __name__ == "__main__":
             print("Please ensure the REDD dataset pickle files are in the data/redd/ directory.")
             sys.exit(1)
     
+    # Configure number of independent runs for each appliance
+    # More runs = more robust results but longer training time
+    num_training_runs = 5  # Run each appliance 5 times with different seeds
+
+    # Optional: Configure different iterations per epoch for each appliance
+    # Set to None to use all batches, or specify a number to limit iterations per epoch
+    iterations_config = {
+        'dish washer': None,    # Use all batches
+        'fridge': None,         # Use all batches
+        'microwave': None,      # Use all batches
+        'washer dryer': None    # Use all batches
+    }
+    # Example with different iterations:
+    # iterations_config = {
+    #     'dish washer': 50,     # Process only 50 batches per epoch
+    #     'fridge': 100,         # Process only 100 batches per epoch
+    #     'microwave': 30,       # Process only 30 batches per epoch
+    #     'washer dryer': 60     # Process only 60 batches per epoch
+    # }
+
     # Run comprehensive test on all specified appliances with standard Liquid Neural Network
-    print("Running comprehensive standard Liquid Neural Network test on all REDD appliances with specific splits...")
+    print(f"Running comprehensive standard Liquid Neural Network test on all REDD appliances ({num_training_runs} runs per appliance)...")
     results = test_liquidnn_on_all_redd_appliances(
         window_size=100,
         hidden_size=128,
@@ -707,20 +964,29 @@ if __name__ == "__main__":
         advanced=False,
         epochs=20,
         lr=0.001,
-        patience=10
+        patience=10,
+        iterations_per_epoch_config=iterations_config,
+        num_runs=num_training_runs
     )
     
     # Print summary for standard Liquid Neural Network
     print(f"\n📊 Summary of standard Liquid Neural Network testing on REDD dataset with specific splits:")
     print(f"Total appliances tested: {len(results)}")
     for appliance, result in results.items():
-        print(f"  {appliance}:")
-        print(f"    Test MAE: {result['final_metrics']['mae']:.4f}")
-        print(f"    Test F1: {result['final_metrics']['f1']:.4f}")
-        print(f"    Test SAE: {result['final_metrics']['sae']:.4f}")
+        print(f"\n  {appliance}:")
+        if result.get('num_runs', 1) > 1 and 'aggregated_metrics' in result:
+            agg = result['aggregated_metrics']
+            print(f"    Test MAE:  {agg['test_mae']['mean']:.4f} ± {agg['test_mae']['std']:.4f} (best: {agg['test_mae']['best']:.4f})")
+            print(f"    Test F1:   {agg['test_f1']['mean']:.4f} ± {agg['test_f1']['std']:.4f} (best: {agg['test_f1']['best']:.4f})")
+            print(f"    Test SAE:  {agg['test_sae']['mean']:.4f} ± {agg['test_sae']['std']:.4f} (best: {agg['test_sae']['best']:.4f})")
+            print(f"    Best run:  #{agg['best_run']}/{result['num_runs']}")
+        else:
+            print(f"    Test MAE: {result['final_metrics']['mae']:.4f}")
+            print(f"    Test F1: {result['final_metrics']['f1']:.4f}")
+            print(f"    Test SAE: {result['final_metrics']['sae']:.4f}")
     
     # Run comprehensive test on all specified appliances with advanced Liquid Neural Network
-    print("\nRunning comprehensive advanced Liquid Neural Network test on all REDD appliances with specific splits...")
+    print(f"\nRunning comprehensive advanced Liquid Neural Network test on all REDD appliances ({num_training_runs} runs per appliance)...")
     results = test_liquidnn_on_all_redd_appliances(
         window_size=100,
         hidden_size=128,
@@ -729,14 +995,23 @@ if __name__ == "__main__":
         advanced=True,
         epochs=20,
         lr=0.001,
-        patience=10
+        patience=10,
+        iterations_per_epoch_config=iterations_config,
+        num_runs=num_training_runs
     )
     
     # Print summary for advanced Liquid Neural Network
     print(f"\n📊 Summary of advanced Liquid Neural Network testing on REDD dataset with specific splits:")
     print(f"Total appliances tested: {len(results)}")
     for appliance, result in results.items():
-        print(f"  {appliance}:")
-        print(f"    Test MAE: {result['final_metrics']['mae']:.4f}")
-        print(f"    Test F1: {result['final_metrics']['f1']:.4f}")
-        print(f"    Test SAE: {result['final_metrics']['sae']:.4f}")
+        print(f"\n  {appliance}:")
+        if result.get('num_runs', 1) > 1 and 'aggregated_metrics' in result:
+            agg = result['aggregated_metrics']
+            print(f"    Test MAE:  {agg['test_mae']['mean']:.4f} ± {agg['test_mae']['std']:.4f} (best: {agg['test_mae']['best']:.4f})")
+            print(f"    Test F1:   {agg['test_f1']['mean']:.4f} ± {agg['test_f1']['std']:.4f} (best: {agg['test_f1']['best']:.4f})")
+            print(f"    Test SAE:  {agg['test_sae']['mean']:.4f} ± {agg['test_sae']['std']:.4f} (best: {agg['test_sae']['best']:.4f})")
+            print(f"    Best run:  #{agg['best_run']}/{result['num_runs']}")
+        else:
+            print(f"    Test MAE: {result['final_metrics']['mae']:.4f}")
+            print(f"    Test F1: {result['final_metrics']['f1']:.4f}")
+            print(f"    Test SAE: {result['final_metrics']['sae']:.4f}")

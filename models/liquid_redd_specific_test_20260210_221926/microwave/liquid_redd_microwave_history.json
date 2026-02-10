@@ -1,0 +1,69 @@
+{
+    "appliance": "microwave",
+    "window_size": 100,
+    "model_params": {
+        "input_size": 1,
+        "output_size": 1,
+        "hidden_size": 128,
+        "num_layers": 1,
+        "dt": 0.1,
+        "advanced": false
+    },
+    "train_params": {
+        "lr": 0.001,
+        "epochs": 20,
+        "patience": 10
+    },
+    "final_metrics": {
+        "train_loss": 13817.257954237197,
+        "val_loss": 28591.818676082956,
+        "test_loss": 32524.410933023453,
+        "test_metrics": {
+            "mae": 27.232044219970703,
+            "rmse": 180.43438720703125,
+            "nete": 0.6453529000282288,
+            "sae": 23.66100311279297,
+            "traditional_sae": 0.328953953953954,
+            "precision": 0.038261515601783064,
+            "recall": 0.7202797202797203,
+            "f1": 0.07266313932980599
+        },
+        "aggregates": {
+            "train_loss_mean": 13897.250841660385,
+            "train_loss_var": 33918.67837444895,
+            "val_loss_mean": 28723.270557511023,
+            "val_loss_var": 13887.642354043855,
+            "train_mae_mean": 18.866270065307617,
+            "train_mae_var": 2.4328932762145996,
+            "val_mae_mean": 27.4208927154541,
+            "val_mae_var": 2.0882019996643066,
+            "train_sae_mean": 9.712814331054688,
+            "train_sae_var": 0.25641608238220215,
+            "val_sae_mean": 25.658462524414062,
+            "val_sae_var": 1.133326768875122,
+            "train_f1_mean": 0.06119569473333301,
+            "train_f1_var": 0.00027083144585818536,
+            "val_f1_mean": 0.04045661882023421,
+            "val_f1_var": 0.0001305573599333669,
+            "test_mae": 27.232044219970703,
+            "test_sae": 23.66100311279297,
+            "test_f1": 0.07266313932980599,
+            "test_loss": 32524.410933023453
+        },
+        "best": {
+            "epoch": 19,
+            "val_loss": 28591.818676082956,
+            "val_metrics": {
+                "mae": 27.500581741333008,
+                "rmse": 169.38514709472656,
+                "nete": 0.3461536169052124,
+                "sae": 25.215627670288086,
+                "traditional_sae": 0.43501742160278745,
+                "precision": 0.027269185820023373,
+                "recall": 1.0,
+                "f1": 0.05309063329541145
+            },
+            "model_path": "models/liquid_redd_specific_test_20260210_221926\\microwave\\liquid_redd_microwave_best.pth"
+        }
+    }
+}

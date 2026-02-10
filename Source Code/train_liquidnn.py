@@ -67,13 +67,16 @@ def train_liquid_model(data_dict, model_params, train_params, save_dir='models',
     history = {
         'train_loss': [],
         'val_loss': [],
-        'val_metrics': []
+        'val_metrics': [],
+        'best': None  # will store {'epoch': int, 'val_loss': float, 'val_metrics': dict}
     }
     
     # Early stopping variables
     best_val_loss = float('inf')
     counter = 0
     best_model_path = None
+    best_epoch = None
+    best_metrics = None
     
     # Start training
     print(f"Starting {model_name} training on {device}...")
@@ -149,8 +152,10 @@ def train_liquid_model(data_dict, model_params, train_params, save_dir='models',
         # Early stopping check
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
+            best_epoch = epoch
+            best_metrics = metrics
             counter = 0
-            
+
             # Save best model
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             best_model_path = os.path.join(save_dir, f"{model_name}_model_best.pth")
@@ -193,7 +198,14 @@ def train_liquid_model(data_dict, model_params, train_params, save_dir='models',
     plt.savefig(os.path.join(save_dir, f"{model_name}_training_history.png"))
     plt.close()
     
-    # Save training history to JSON
+    # Save training history to JSON (including best epoch info)
+    history['best'] = {
+        'epoch': int(best_epoch) if best_epoch is not None else None,
+        'val_loss': float(best_val_loss) if best_epoch is not None else None,
+        'val_metrics': {k: float(v) for k, v in best_metrics.items()} if best_metrics is not None else None,
+        'model_path': best_model_path
+    }
+
     with open(os.path.join(save_dir, f'{model_name}_history.json'), 'w') as f:
         json_history = {
             'train_loss': [float(x) for x in history['train_loss']],
@@ -201,7 +213,8 @@ def train_liquid_model(data_dict, model_params, train_params, save_dir='models',
             'val_metrics': [
                 {k: float(v) for k, v in metrics.items()}
                 for metrics in history['val_metrics']
-            ]
+            ],
+            'best': history['best']
         }
         json.dump(json_history, f, indent=4)
     
@@ -300,10 +313,18 @@ def train_liquid_all_appliances(house_number=1, window_size=100, save_dir='model
             )
             
             # Store results
+            # Prefer best metrics; fall back to last epoch if missing
+            final_metrics = None
+            if history.get('best') and history['best'].get('val_metrics'):
+                final_metrics = history['best']['val_metrics']
+            elif history['val_metrics']:
+                final_metrics = history['val_metrics'][-1]
+
             results[appliance_name] = {
                 'model_path': best_model_path,
                 'appliance_index': appliance_idx,
-                'final_metrics': history['val_metrics'][-1] if history['val_metrics'] else None
+                'final_metrics': final_metrics,
+                'best_epoch': history.get('best', {}).get('epoch')
             }
             
             # Log success
@@ -321,7 +342,8 @@ def train_liquid_all_appliances(house_number=1, window_size=100, save_dir='model
         'results': {
             name: {
                 'model_path': info['model_path'],
-                'final_metrics': {k: float(v) for k, v in info['final_metrics'].items()} if info['final_metrics'] else None
+                'final_metrics': {k: float(v) for k, v in info['final_metrics'].items()} if info['final_metrics'] else None,
+                'best_epoch': info.get('best_epoch')
             }
             for name, info in results.items()
         }
