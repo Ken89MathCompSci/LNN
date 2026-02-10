@@ -44,7 +44,11 @@ class CausalLiquidCell(nn.Module):
         self.causal_attention = nn.Linear(hidden_size, hidden_size)
 
         # Event detector (for causal event weighting)
-        self.event_detector = nn.Linear(input_size, 1)
+        # Takes both current input and previous input to detect changes
+        self.event_detector = nn.Linear(input_size * 2, 1)
+
+        # Store previous input for event detection
+        self.prev_input = None
 
     def forward(self, x, hidden):
         """
@@ -58,8 +62,18 @@ class CausalLiquidCell(nn.Module):
             new_hidden: Updated hidden state
             event_weight: Causal event weight for this time step
         """
-        # Detect causal events (sudden changes in input)
-        event_weight = torch.sigmoid(self.event_detector(x))
+        # Detect causal events by comparing current and previous inputs
+        if self.prev_input is None:
+            # First time step: no event detected
+            event_weight = torch.zeros(x.size(0), 1, device=x.device)
+        else:
+            # Detect events from temporal changes
+            # Concatenate current and previous inputs
+            event_input = torch.cat([x, self.prev_input], dim=1)
+            event_weight = torch.sigmoid(self.event_detector(event_input))
+
+        # Update previous input for next time step
+        self.prev_input = x.detach()
 
         # Compute input contribution
         input_contrib = torch.tanh(self.W_in(x))
@@ -74,6 +88,7 @@ class CausalLiquidCell(nn.Module):
         dhidden_dt = (-hidden + input_contrib + recurrent_contrib) / tau_clamped
 
         # Euler integration with causal event weighting
+        # Event weighting amplifies updates when input changes significantly
         new_hidden = hidden + self.dt * dhidden_dt * (1.0 + event_weight)
 
         return new_hidden, event_weight
@@ -128,6 +143,9 @@ class CausalLiquidNetworkModel(nn.Module):
 
         # Initialize hidden state
         hidden = torch.zeros(batch_size, self.hidden_size, device=x.device)
+
+        # Reset previous input for new sequence
+        self.liquid_cell.prev_input = None
 
         # Event accumulator for tracking causal influence
         event_accumulation = torch.zeros(batch_size, self.hidden_size, device=x.device)
@@ -232,6 +250,10 @@ class AdvancedCausalLiquidNetworkModel(nn.Module):
             torch.zeros(batch_size, self.hidden_size, device=x.device)
             for _ in range(self.num_layers)
         ]
+
+        # Reset previous inputs for all causal cells (new sequence)
+        for cell in self.liquid_cells:
+            cell.prev_input = None
 
         # Track event weights from all layers
         all_event_weights = [[] for _ in range(self.num_layers)]
