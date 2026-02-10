@@ -14,9 +14,9 @@ from tqdm import tqdm
 import pickle
 
 # Add Source Code to path
-sys.path.append('Source Code')
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'Source Code'))
 
-from liquidnn import LiquidNetworkModel, AdvancedLiquidNetworkModel
+from models import LiquidNetworkModel, AdvancedLiquidNetworkModel
 from utils import calculate_nilm_metrics, save_model
 
 
