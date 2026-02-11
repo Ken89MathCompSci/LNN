@@ -629,8 +629,147 @@ class SimpleTransformerModel(nn.Module):
         
         # Global average pooling over the sequence dimension
         x = torch.mean(x, dim=1)
-        
+
         # Output layer
         x = self.output_layer(x)
-        
+
         return x
+
+
+# ============================================================================
+# ATTENTION-ENHANCED LIQUID NEURAL NETWORKS
+# ============================================================================
+
+class SelfAttention(nn.Module):
+    """
+    Multi-head self-attention mechanism for temporal sequences.
+    Helps the model focus on relevant time steps in the input sequence.
+    """
+    def __init__(self, hidden_size, num_heads=4, dropout=0.1):
+        super(SelfAttention, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        self.head_dim = hidden_size // num_heads
+
+        assert self.head_dim * num_heads == hidden_size, "hidden_size must be divisible by num_heads"
+
+        # Linear projections for Q, K, V
+        self.query = nn.Linear(hidden_size, hidden_size)
+        self.key = nn.Linear(hidden_size, hidden_size)
+        self.value = nn.Linear(hidden_size, hidden_size)
+
+        # Output projection
+        self.out = nn.Linear(hidden_size, hidden_size)
+
+        # Dropout
+        self.dropout = nn.Dropout(dropout)
+
+        # Layer normalization
+        self.layer_norm = nn.LayerNorm(hidden_size)
+
+    def forward(self, x):
+        """
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, hidden_size)
+
+        Returns:
+            Output tensor of shape (batch_size, seq_len, hidden_size)
+        """
+        batch_size, seq_len, hidden_size = x.size()
+
+        # Save residual connection
+        residual = x
+
+        # Linear projections and split into multiple heads
+        # Shape: (batch_size, seq_len, hidden_size) -> (batch_size, num_heads, seq_len, head_dim)
+        Q = self.query(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        K = self.key(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        V = self.value(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+
+        # Scaled dot-product attention
+        # Shape: (batch_size, num_heads, seq_len, seq_len)
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / np.sqrt(self.head_dim)
+        attention_weights = torch.softmax(scores, dim=-1)
+        attention_weights = self.dropout(attention_weights)
+
+        # Apply attention to values
+        # Shape: (batch_size, num_heads, seq_len, head_dim)
+        attention_output = torch.matmul(attention_weights, V)
+
+        # Concatenate heads
+        # Shape: (batch_size, seq_len, hidden_size)
+        attention_output = attention_output.transpose(1, 2).contiguous().view(batch_size, seq_len, hidden_size)
+
+        # Final linear projection
+        output = self.out(attention_output)
+        output = self.dropout(output)
+
+        # Add residual connection and layer normalization
+        output = self.layer_norm(output + residual)
+
+        return output
+
+
+class AttentionLiquidNetworkModel(nn.Module):
+    """
+    Attention-Enhanced Liquid Neural Network for NILM.
+
+    Architecture:
+        Input -> Liquid Layer (ODE) -> Self-Attention -> FC -> Output
+
+    The self-attention mechanism helps the model focus on relevant time steps
+    in the sequence, improving performance on appliance state transitions.
+    """
+    def __init__(self, input_size, hidden_size, output_size, dt=0.1, num_heads=4, dropout=0.1):
+        super(AttentionLiquidNetworkModel, self).__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.output_size = output_size
+        self.dt = dt
+
+        # Input projection
+        self.input_layer = nn.Linear(input_size, hidden_size)
+
+        # Single liquid layer
+        self.liquid = LiquidODECell(hidden_size, hidden_size, dt=dt)
+
+        # Self-attention mechanism
+        self.attention = SelfAttention(hidden_size, num_heads=num_heads, dropout=dropout)
+
+        # Output layer
+        self.fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        """
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, input_size)
+
+        Returns:
+            Output tensor of shape (batch_size, output_size)
+        """
+        batch_size, seq_len, _ = x.size()
+
+        # Project input to hidden dimension
+        x = self.input_layer(x)  # (batch_size, seq_len, hidden_size)
+
+        # Process through liquid layer
+        h = torch.zeros(batch_size, self.hidden_size).to(x.device)
+        liquid_outputs = []
+
+        for t in range(seq_len):
+            h = self.liquid(x[:, t, :], h)
+            liquid_outputs.append(h)
+
+        # Stack outputs: (batch_size, seq_len, hidden_size)
+        liquid_outputs = torch.stack(liquid_outputs, dim=1)
+
+        # Apply self-attention
+        attended = self.attention(liquid_outputs)  # (batch_size, seq_len, hidden_size)
+
+        # Use the last time step output
+        output = attended[:, -1, :]  # (batch_size, hidden_size)
+
+        # Final prediction
+        output = self.fc(output)  # (batch_size, output_size)
+
+        return output

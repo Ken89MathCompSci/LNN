@@ -1,6 +1,11 @@
 """
 Test Attention-Enhanced Liquid Neural Networks on REDD Dataset
-With MatNILM-inspired Data Augmentation
+With MatNILM-Exact Data Augmentation
+
+This implementation EXACTLY matches MatNILM's augmentation strategy:
+- 4 modes with equal 25% probability (none, vertical, horizontal, both)
+- Appliance-specific probabilities (dishwasher: 0.3, fridge: 0.6, microwave: 0.3, washer: 0.3)
+- Truncated normal scaling (μ=1, σ=0.2, range=[0.6, 1.4])
 """
 
 import sys
@@ -34,6 +39,31 @@ def get_threshold_for_appliance(appliance_name):
         return 0.5
     else:
         return 10.0
+
+
+def get_matnilm_augmentation_probability(appliance_name):
+    """
+    Get MatNILM-specific augmentation probability for each appliance
+
+    MatNILM uses different probabilities per appliance:
+    - Dishwasher: 0.3
+    - Fridge: 0.6
+    - Microwave: 0.3
+    - Washer Dryer: 0.3
+
+    Args:
+        appliance_name: Name of the appliance
+
+    Returns:
+        Augmentation probability (float)
+    """
+    matnilm_probs = {
+        'dish washer': 0.3,
+        'fridge': 0.6,
+        'microwave': 0.3,
+        'washer dryer': 0.3
+    }
+    return matnilm_probs.get(appliance_name, 0.3)  # Default to 0.3 if not found
 
 
 def load_redd_specific_splits():
@@ -90,7 +120,7 @@ class REDDSpecificDataset(torch.utils.data.Dataset):
 
 
 # ============================================================================
-# DATA AUGMENTATION (MatNILM-inspired)
+# DATA AUGMENTATION (MatNILM-Exact Implementation)
 # ============================================================================
 
 def vertical_scale(x):
@@ -142,7 +172,7 @@ def add_noise(signal, noise_factor=0.02):
 
 def apply_augmentation_to_batch(X_batch, mode='none'):
     """
-    Apply data augmentation to a batch of input sequences
+    Apply data augmentation to a batch of input sequences (MatNILM-aligned)
 
     Args:
         X_batch: Input batch of shape (batch_size, seq_len, 1)
@@ -151,8 +181,7 @@ def apply_augmentation_to_batch(X_batch, mode='none'):
             - 'vertical': Vertical scaling only
             - 'horizontal': Horizontal scaling only
             - 'both': Both vertical and horizontal
-            - 'noise': Add Gaussian noise
-            - 'mixed': Randomly choose augmentation
+            - 'mixed': Randomly choose augmentation (MatNILM strategy)
 
     Returns:
         Augmented batch
@@ -166,10 +195,10 @@ def apply_augmentation_to_batch(X_batch, mode='none'):
     for i in range(batch_size):
         signal = X_batch[i, :, 0]
 
-        # Choose augmentation strategy
+        # Choose augmentation strategy (MatNILM: 4 modes with equal probability)
         if mode == 'mixed':
-            aug_choice = np.random.choice(['vertical', 'horizontal', 'both', 'noise', 'none'],
-                                         p=[0.25, 0.25, 0.25, 0.15, 0.1])
+            aug_choice = np.random.choice(['none', 'vertical', 'horizontal', 'both'],
+                                         p=[0.25, 0.25, 0.25, 0.25])
         else:
             aug_choice = mode
 
@@ -181,8 +210,7 @@ def apply_augmentation_to_batch(X_batch, mode='none'):
         elif aug_choice == 'both':
             signal = horizontal_scale(signal, target_length=seq_len)
             signal = vertical_scale(signal)
-        elif aug_choice == 'noise':
-            signal = add_noise(signal, noise_factor=0.02)
+        # 'none' mode: no transformation applied
 
         X_aug[i, :, 0] = signal
 
@@ -214,14 +242,14 @@ def train_attention_liquidnn_on_specific_redd_appliance(
         patience: Early stopping patience
         seed: Random seed
         save_dir: Directory to save model and results
-        augmentation: Data augmentation mode:
+        augmentation: Data augmentation mode (MatNILM-aligned):
             'none': No augmentation (default)
             'vertical': Vertical scaling only
             'horizontal': Horizontal scaling only
             'both': Both vertical and horizontal
-            'noise': Add Gaussian noise
-            'mixed': Randomly choose augmentation
+            'mixed': Randomly choose augmentation (MatNILM: equal 25% for each mode)
         aug_probability: Probability of applying augmentation to each batch
+                        (MatNILM defaults: 0.3 for dishwasher/microwave/washer, 0.6 for fridge)
 
     Returns:
         Trained model, training history, and evaluation metrics
@@ -640,6 +668,13 @@ def test_attention_liquidnn_on_all_redd_appliances(
         appliance_dir = os.path.join(base_save_dir, appliance_name.replace(' ', '_'))
         os.makedirs(appliance_dir, exist_ok=True)
 
+        # Get MatNILM-specific augmentation probability for this appliance
+        if augmentation != 'none':
+            appliance_aug_prob = get_matnilm_augmentation_probability(appliance_name)
+            print(f"Using MatNILM augmentation probability: {appliance_aug_prob} for {appliance_name}")
+        else:
+            appliance_aug_prob = aug_probability  # Use provided value for no augmentation
+
         try:
             model, history, test_metrics = train_attention_liquidnn_on_specific_redd_appliance(
                 data_dict,
@@ -657,7 +692,7 @@ def test_attention_liquidnn_on_all_redd_appliances(
                 seed=42,
                 save_dir=appliance_dir,
                 augmentation=augmentation,
-                aug_probability=aug_probability
+                aug_probability=appliance_aug_prob
             )
 
             if model is not None:
@@ -753,13 +788,21 @@ if __name__ == "__main__":
         print(f"    Test SAE: {result['final_metrics']['sae']:.4f}")
 
     # =================================================================
-    # OPTION 2: Test WITH Data Augmentation (MatNILM-inspired)
+    # OPTION 2: Test WITH Data Augmentation (MatNILM-exact)
     # =================================================================
     print("\n" + "=" * 70)
-    print("TESTING: Attention LNN WITH Data Augmentation")
+    print("TESTING: Attention LNN WITH MatNILM-Exact Data Augmentation")
     print("=" * 70)
-    print("Augmentation mode: 'mixed' (randomly applies vertical/horizontal/both/noise)")
-    print("Augmentation probability: 0.5 (50% of batches)")
+    print("Augmentation mode: 'mixed' (4 modes with equal 25% probability)")
+    print("  - 25% none (no augmentation)")
+    print("  - 25% vertical scaling only")
+    print("  - 25% horizontal scaling only")
+    print("  - 25% both vertical + horizontal")
+    print("Augmentation probabilities (MatNILM-specific per appliance):")
+    print("  - Dishwasher: 0.3")
+    print("  - Fridge: 0.6")
+    print("  - Microwave: 0.3")
+    print("  - Washer Dryer: 0.3")
     results_augmented = test_attention_liquidnn_on_all_redd_appliances(
         model_type='attention',
         window_size=100,
@@ -771,8 +814,8 @@ if __name__ == "__main__":
         epochs=20,
         lr=0.001,
         patience=10,
-        augmentation='mixed',  # MatNILM-style augmentation
-        aug_probability=0.5    # 50% probability
+        augmentation='mixed',  # MatNILM-exact augmentation
+        aug_probability=0.5    # This will be overridden by appliance-specific values
     )
 
     # Print summary
