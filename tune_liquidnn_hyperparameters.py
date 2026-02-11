@@ -68,6 +68,10 @@ def tune_hyperparameters(appliance_name='dish washer'):
                 os.makedirs(save_dir, exist_ok=True)
 
                 try:
+                    # Adjust dt based on num_layers for stability
+                    # More layers = smaller dt to prevent numerical instability
+                    dt = 0.1 if num_layers == 2 else 0.01
+
                     # Train with this configuration
                     model, history, test_metrics = train_liquidnn_on_specific_redd_appliance(
                         data_dict,
@@ -75,7 +79,7 @@ def tune_hyperparameters(appliance_name='dish washer'):
                         window_size=100,
                         hidden_size=hidden_size,
                         num_layers=num_layers,
-                        dt=0.1,
+                        dt=dt,
                         advanced=True,
                         epochs=20,
                         lr=lr,

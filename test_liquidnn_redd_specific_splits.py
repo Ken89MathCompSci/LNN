@@ -194,18 +194,26 @@ def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_
     
     # Create sequences for each split
     print(f"Creating sequences for {appliance_name}...")
-    
+
     # For NILM, we use aggregate as input and appliance as target
     X_train, y_train = create_sequences(train_data, window_size=window_size, target_size=1)
     X_val, y_val = create_sequences(val_data, window_size=window_size, target_size=1)
     X_test, y_test = create_sequences(test_data, window_size=window_size, target_size=1)
-    
+
     # Use appliance power as target instead of aggregate
     # This is the key difference - we're predicting the appliance from the aggregate
     y_train = train_data[appliance_name].iloc[::5].values.reshape(-1, 1)[:len(X_train)]
     y_val = val_data[appliance_name].iloc[::5].values.reshape(-1, 1)[:len(X_val)]
     y_test = test_data[appliance_name].iloc[::5].values.reshape(-1, 1)[:len(X_test)]
-    
+
+    # Normalize inputs for better stability
+    X_mean = X_train.mean()
+    X_std = X_train.std() + 1e-8
+    X_train = (X_train - X_mean) / X_std
+    X_val = (X_val - X_mean) / X_std
+    X_test = (X_test - X_mean) / X_std
+    print(f"Input normalization: mean={X_mean:.2f}, std={X_std:.2f}")
+
     print(f"Training sequences: {X_train.shape} -> {y_train.shape}")
     print(f"Validation sequences: {X_val.shape} -> {y_val.shape}")
     print(f"Test sequences: {X_test.shape} -> {y_test.shape}")
@@ -262,7 +270,8 @@ def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_
     best_metrics = None
     counter = 0
     best_model_path = None
-    
+    consecutive_nan_epochs = 0
+
     print(f"Starting {model_name} training for {appliance_name}...")
     
     # Training loop
@@ -296,8 +305,17 @@ def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_
             # Calculate loss
             loss = criterion(outputs, targets)
 
+            # Check for NaN loss
+            if torch.isnan(loss):
+                print(f"WARNING: NaN loss detected at batch {batch_idx}! Skipping batch...")
+                continue
+
             # Backward pass and optimize
             loss.backward()
+
+            # Gradient clipping to prevent explosion
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
             optimizer.step()
 
             # Update statistics
@@ -313,13 +331,26 @@ def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_
         avg_train_loss = train_loss / num_train_batches if num_train_batches > 0 else 0.0
         history['train_loss'].append(avg_train_loss)
 
+        # Check for NaN in training loss
+        if np.isnan(avg_train_loss):
+            consecutive_nan_epochs += 1
+            if consecutive_nan_epochs >= 3:
+                print(f"\n❌ Training aborted: Model produced NaN loss for {consecutive_nan_epochs} consecutive epochs")
+                print("This typically indicates:")
+                print("  - Learning rate too high")
+                print("  - Gradient explosion")
+                print("  - Numerical instability in model")
+                raise ValueError(f"Training failed with persistent NaN losses for {appliance_name}")
+        else:
+            consecutive_nan_epochs = 0
+
         # Training metrics
         train_targets = np.concatenate(train_targets)
         train_outputs = np.concatenate(train_outputs)
         train_threshold = get_threshold_for_appliance(appliance_name)
         train_metrics = calculate_nilm_metrics(train_targets, train_outputs, threshold=train_threshold)
         history['train_metrics'].append(train_metrics)
-        
+
         # Validation phase
         model.eval()
         val_loss = 0.0

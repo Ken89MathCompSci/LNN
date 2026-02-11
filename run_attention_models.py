@@ -34,7 +34,9 @@ def train_model(model, train_loader, val_loader, epochs=20, lr=0.001, patience=1
 
     best_val_loss = float('inf')
     patience_counter = 0
-    history = {'train_loss': [], 'val_loss': []}
+    best_model_state = None  # Initialize to None
+    history = {'train_loss': [], 'val_loss': [], 'failed': False}
+    consecutive_nan_epochs = 0
 
     for epoch in range(epochs):
         # Training
@@ -46,12 +48,32 @@ def train_model(model, train_loader, val_loader, epochs=20, lr=0.001, patience=1
             optimizer.zero_grad()
             outputs = model(batch_x)
             loss = criterion(outputs, batch_y)
+
+            # Check for NaN loss
+            if torch.isnan(loss):
+                print(f"WARNING: NaN loss detected! Skipping batch...")
+                continue
+
             loss.backward()
+
+            # Gradient clipping to prevent explosion
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
             optimizer.step()
 
             train_loss += loss.item()
 
         train_loss /= len(train_loader)
+
+        # Check for NaN in training loss
+        if np.isnan(train_loss):
+            consecutive_nan_epochs += 1
+            if consecutive_nan_epochs >= 3:
+                print(f"Aborting: Model produced NaN loss for {consecutive_nan_epochs} consecutive epochs")
+                history['failed'] = True
+                break
+        else:
+            consecutive_nan_epochs = 0
 
         # Validation
         model.eval()
@@ -71,7 +93,7 @@ def train_model(model, train_loader, val_loader, epochs=20, lr=0.001, patience=1
         print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
 
         # Early stopping
-        if val_loss < best_val_loss:
+        if not np.isnan(val_loss) and val_loss < best_val_loss:
             best_val_loss = val_loss
             patience_counter = 0
             best_model_state = model.state_dict().copy()
@@ -79,8 +101,15 @@ def train_model(model, train_loader, val_loader, epochs=20, lr=0.001, patience=1
             patience_counter += 1
             if patience_counter >= patience:
                 print(f"Early stopping at epoch {epoch+1}")
-                model.load_state_dict(best_model_state)
+                if best_model_state is not None:
+                    model.load_state_dict(best_model_state)
+                else:
+                    print("WARNING: No valid model state saved (all losses were NaN)")
                 break
+
+    # Load best model if we have one
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
 
     return model, history
 
@@ -154,6 +183,15 @@ def run_comparison(appliance_name='dish washer', window_size=100, hidden_size=25
     y_val = val_data[appliance_name].iloc[::5].values.reshape(-1, 1)[:len(X_val)]
     y_test = test_data[appliance_name].iloc[::5].values.reshape(-1, 1)[:len(X_test)]
 
+    # Normalize inputs for better stability (use training stats)
+    X_mean = X_train.mean()
+    X_std = X_train.std() + 1e-8  # Add epsilon to avoid division by zero
+    X_train = (X_train - X_mean) / X_std
+    X_val = (X_val - X_mean) / X_std
+    X_test = (X_test - X_mean) / X_std
+
+    print(f"  Input normalization: mean={X_mean:.2f}, std={X_std:.2f}")
+
     print(f"  Training sequences: {X_train.shape} -> {y_train.shape}")
     print(f"  Validation sequences: {X_val.shape} -> {y_val.shape}")
     print(f"  Test sequences: {X_test.shape} -> {y_test.shape}")
@@ -174,30 +212,34 @@ def run_comparison(appliance_name='dish washer', window_size=100, hidden_size=25
     # Results storage
     results = {}
 
-    # Model configurations
+    # Model configurations (with model-specific learning rates and dt)
     models_config = [
         {
             'name': 'Standard LNN',
             'model': LiquidNetworkModel(input_size, hidden_size, output_size, dt=0.1),
+            'lr': lr,
             'color': 'blue'
         },
         {
             'name': 'Advanced LNN',
             'model': AdvancedLiquidNetworkModel(input_size, hidden_size, output_size,
-                                                num_layers=num_layers, dt=0.1),
+                                                num_layers=num_layers, dt=0.01),  # 10x smaller dt
+            'lr': lr * 0.01,  # 100x lower LR for stability
             'color': 'green'
         },
         {
             'name': 'Attention LNN',
             'model': AttentionLiquidNetworkModel(input_size, hidden_size, output_size,
                                                  dt=0.1, num_heads=4, dropout=0.1),
+            'lr': lr,
             'color': 'orange'
         },
         {
             'name': 'Advanced Attention LNN',
             'model': AdvancedAttentionLiquidNetworkModel(input_size, hidden_size, output_size,
-                                                         num_layers=num_layers, dt=0.1,
+                                                         num_layers=num_layers, dt=0.01,  # 10x smaller dt
                                                          num_heads=4, dropout=0.1),
+            'lr': lr * 0.01,  # 100x lower LR for stability
             'color': 'red'
         }
     ]
@@ -214,12 +256,33 @@ def run_comparison(appliance_name='dish washer', window_size=100, hidden_size=25
         num_params = sum(p.numel() for p in model.parameters())
         print(f"Model parameters: {num_params:,}")
 
+        # Check for NaN in initial weights
+        has_nan = any(torch.isnan(p).any() for p in model.parameters())
+        if has_nan:
+            print("WARNING: Model has NaN weights after initialization!")
+
+        # Get model-specific learning rate
+        model_lr = config['lr']
+        print(f"Learning rate: {model_lr}")
+
         # Train
         print("\nTraining...")
         trained_model, history = train_model(
             model, train_loader, val_loader,
-            epochs=epochs, lr=lr, patience=10, device=device
+            epochs=epochs, lr=model_lr, patience=10, device=device
         )
+
+        # Check if training failed
+        if history.get('failed', False):
+            print(f"\n❌ {config['name']} training failed (persistent NaN losses)")
+            print("   Skipping evaluation for this model.")
+            results[config['name']] = {
+                'metrics': None,
+                'history': history,
+                'num_params': num_params,
+                'failed': True
+            }
+            continue
 
         # Evaluate
         print("\nEvaluating on test set...")
@@ -231,7 +294,8 @@ def run_comparison(appliance_name='dish washer', window_size=100, hidden_size=25
             'history': history,
             'num_params': num_params,
             'predictions': predictions,
-            'targets': targets
+            'targets': targets,
+            'failed': False
         }
 
         print(f"\n✅ {config['name']} Test Results:")
@@ -249,31 +313,40 @@ def run_comparison(appliance_name='dish washer', window_size=100, hidden_size=25
     print(f"\n{'Model':<25} {'F1 Score':<12} {'MAE':<12} {'SAE':<12} {'Params':<12}")
     print("-" * 80)
 
-    # Sort by F1 score
-    sorted_results = sorted(results.items(), key=lambda x: x[1]['metrics']['f1'], reverse=True)
+    # Sort by F1 score (put failed models at the end)
+    sorted_results = sorted(
+        results.items(),
+        key=lambda x: (x[1].get('failed', False), -(x[1]['metrics']['f1'] if x[1]['metrics'] else -1))
+    )
 
     for rank, (name, result) in enumerate(sorted_results, 1):
-        marker = "🏆" if rank == 1 else "  "
-        metrics = result['metrics']
+        marker = "🏆" if rank == 1 and not result.get('failed', False) else "  "
         params = result['num_params']
-        print(f"{marker} {name:<23} {metrics['f1']:<12.4f} {metrics['mae']:<12.4f} "
-              f"{metrics['sae']:<12.4f} {params:<12,}")
+        if result.get('failed', False):
+            print(f"❌ {name:<23} {'FAILED':<12} {'N/A':<12} {'N/A':<12} {params:<12,}")
+        else:
+            metrics = result['metrics']
+            print(f"{marker} {name:<23} {metrics['f1']:<12.4f} {metrics['mae']:<12.4f} "
+                  f"{metrics['sae']:<12.4f} {params:<12,}")
 
-    # Calculate improvements
+    # Calculate improvements (only for successful models)
     print("\n" + "=" * 80)
     print("IMPROVEMENT ANALYSIS")
     print("=" * 80)
 
-    baseline_f1 = results['Standard LNN']['metrics']['f1']
+    if not results['Standard LNN'].get('failed', False):
+        baseline_f1 = results['Standard LNN']['metrics']['f1']
 
-    print(f"\nBaseline (Standard LNN) F1: {baseline_f1:.4f}\n")
+        print(f"\nBaseline (Standard LNN) F1: {baseline_f1:.4f}\n")
 
-    for name, result in results.items():
-        if name != 'Standard LNN':
-            f1 = result['metrics']['f1']
-            improvement = ((f1 - baseline_f1) / baseline_f1) * 100
-            sign = "+" if improvement > 0 else ""
-            print(f"{name:<25} F1: {f1:.4f}  ({sign}{improvement:>6.2f}% vs baseline)")
+        for name, result in results.items():
+            if name != 'Standard LNN' and not result.get('failed', False):
+                f1 = result['metrics']['f1']
+                improvement = ((f1 - baseline_f1) / baseline_f1) * 100
+                sign = "+" if improvement > 0 else ""
+                print(f"{name:<25} F1: {f1:.4f}  ({sign}{improvement:>6.2f}% vs baseline)")
+    else:
+        print("\nBaseline model failed - cannot calculate improvements")
 
     # Save results
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
