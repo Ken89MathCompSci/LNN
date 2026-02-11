@@ -710,6 +710,60 @@ class SelfAttention(nn.Module):
         return output
 
 
+class LiquidODECell(nn.Module):
+    """
+    Liquid ODE Cell for continuous-time recurrent computation.
+
+    This cell implements a simple liquid time-constant RNN cell using ODE integration.
+    It's designed to work with the AttentionLiquidNetworkModel.
+    """
+    def __init__(self, input_size, hidden_size, dt=0.1):
+        super(LiquidODECell, self).__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.dt = dt
+
+        # Input projection
+        self.input_proj = nn.Linear(input_size, hidden_size)
+
+        # Time constants (initialized to 1.0)
+        self.tau = nn.Parameter(torch.ones(hidden_size))
+
+        # Recurrent weights
+        self.rec_weights = nn.Parameter(torch.Tensor(hidden_size, hidden_size))
+        nn.init.xavier_uniform_(self.rec_weights)
+
+        # Activation function
+        self.tanh = nn.Tanh()
+
+    def forward(self, x, hidden):
+        """
+        Forward pass with Euler integration.
+
+        Args:
+            x: Input tensor of shape (batch_size, input_size)
+            hidden: Hidden state tensor of shape (batch_size, hidden_size)
+
+        Returns:
+            New hidden state of shape (batch_size, hidden_size)
+        """
+        # Input projection
+        input_proj = self.input_proj(x)
+
+        # Recurrent projection
+        rec_proj = torch.matmul(hidden, self.rec_weights)
+
+        # ODE integration (Euler method)
+        # dh/dt = -h/tau + f(Wx + Uh)
+        f_t = self.tanh(input_proj + rec_proj)
+        dh = (-hidden / self.tau.unsqueeze(0) + f_t) * self.dt
+
+        # Update hidden state
+        new_hidden = hidden + dh
+
+        return new_hidden
+
+
 class AttentionLiquidNetworkModel(nn.Module):
     """
     Attention-Enhanced Liquid Neural Network for NILM.
