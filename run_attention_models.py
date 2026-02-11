@@ -12,8 +12,8 @@ import numpy as np
 from datetime import datetime
 from test_liquidnn_redd_specific_splits import (
     load_redd_specific_splits,
-    create_sliding_windows,
-    calculate_metrics
+    create_sequences,
+    REDDSpecificDataset
 )
 
 # Import the new attention models
@@ -24,6 +24,7 @@ from models import (
     AttentionLiquidNetworkModel,
     AdvancedAttentionLiquidNetworkModel
 )
+from utils import calculate_nilm_metrics
 
 
 def train_model(model, train_loader, val_loader, epochs=20, lr=0.001, patience=10, device='cuda'):
@@ -84,7 +85,7 @@ def train_model(model, train_loader, val_loader, epochs=20, lr=0.001, patience=1
     return model, history
 
 
-def evaluate_model(model, test_loader, device='cuda'):
+def evaluate_model(model, test_loader, appliance_name, device='cuda'):
     """Evaluate model on test set"""
     model.eval()
     all_predictions = []
@@ -97,10 +98,12 @@ def evaluate_model(model, test_loader, device='cuda'):
             all_predictions.append(outputs.cpu().numpy())
             all_targets.append(batch_y.numpy())
 
-    predictions = np.concatenate(all_predictions, axis=0).flatten()
-    targets = np.concatenate(all_targets, axis=0).flatten()
+    predictions = np.concatenate(all_predictions, axis=0)
+    targets = np.concatenate(all_targets, axis=0)
 
-    metrics = calculate_metrics(targets, predictions)
+    # Use appropriate threshold for this appliance
+    threshold = 10.0 if appliance_name != 'washer dryer' else 0.5
+    metrics = calculate_nilm_metrics(targets, predictions, threshold=threshold)
     return metrics, predictions, targets
 
 
@@ -132,37 +135,34 @@ def run_comparison(appliance_name='dish washer', window_size=100, hidden_size=25
     print("\nLoading REDD dataset...")
     data_dict = load_redd_specific_splits()
 
-    # Prepare data
-    train_x = data_dict['train'][appliance_name]['aggregate']
-    train_y = data_dict['train'][appliance_name]['appliance']
-    val_x = data_dict['val'][appliance_name]['aggregate']
-    val_y = data_dict['val'][appliance_name]['appliance']
-    test_x = data_dict['test'][appliance_name]['aggregate']
-    test_y = data_dict['test'][appliance_name]['appliance']
+    # Extract data for this appliance
+    train_data = data_dict['train']
+    val_data = data_dict['val']
+    test_data = data_dict['test']
 
     print(f"\nData shapes:")
-    print(f"  Train: {train_x.shape}, Val: {val_x.shape}, Test: {test_x.shape}")
+    print(f"  Train: {train_data.shape}, Val: {val_data.shape}, Test: {test_data.shape}")
 
-    # Create sliding windows
-    print(f"\nCreating sliding windows (window_size={window_size})...")
-    train_windows_x, train_windows_y = create_sliding_windows(train_x, train_y, window_size)
-    val_windows_x, val_windows_y = create_sliding_windows(val_x, val_y, window_size)
-    test_windows_x, test_windows_y = create_sliding_windows(test_x, test_y, window_size)
+    # Create sequences
+    print(f"\nCreating sequences (window_size={window_size})...")
+    X_train, y_train_temp = create_sequences(train_data, window_size=window_size, target_size=1)
+    X_val, y_val_temp = create_sequences(val_data, window_size=window_size, target_size=1)
+    X_test, y_test_temp = create_sequences(test_data, window_size=window_size, target_size=1)
 
-    # Create data loaders
+    # Use appliance power as target (same logic as in test_liquidnn_redd_specific_splits.py)
+    y_train = train_data[appliance_name].iloc[::5].values.reshape(-1, 1)[:len(X_train)]
+    y_val = val_data[appliance_name].iloc[::5].values.reshape(-1, 1)[:len(X_val)]
+    y_test = test_data[appliance_name].iloc[::5].values.reshape(-1, 1)[:len(X_test)]
+
+    print(f"  Training sequences: {X_train.shape} -> {y_train.shape}")
+    print(f"  Validation sequences: {X_val.shape} -> {y_val.shape}")
+    print(f"  Test sequences: {X_test.shape} -> {y_test.shape}")
+
+    # Create datasets and dataloaders
     batch_size = 32
-    train_dataset = torch.utils.data.TensorDataset(
-        torch.FloatTensor(train_windows_x),
-        torch.FloatTensor(train_windows_y)
-    )
-    val_dataset = torch.utils.data.TensorDataset(
-        torch.FloatTensor(val_windows_x),
-        torch.FloatTensor(val_windows_y)
-    )
-    test_dataset = torch.utils.data.TensorDataset(
-        torch.FloatTensor(test_windows_x),
-        torch.FloatTensor(test_windows_y)
-    )
+    train_dataset = REDDSpecificDataset(X_train, y_train)
+    val_dataset = REDDSpecificDataset(X_val, y_val)
+    test_dataset = REDDSpecificDataset(X_test, y_test)
 
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
@@ -223,7 +223,7 @@ def run_comparison(appliance_name='dish washer', window_size=100, hidden_size=25
 
         # Evaluate
         print("\nEvaluating on test set...")
-        test_metrics, predictions, targets = evaluate_model(trained_model, test_loader, device)
+        test_metrics, predictions, targets = evaluate_model(trained_model, test_loader, appliance_name, device)
 
         # Store results
         results[config['name']] = {
