@@ -827,3 +827,206 @@ class AttentionLiquidNetworkModel(nn.Module):
         output = self.fc(output)  # (batch_size, output_size)
 
         return output
+
+
+class CNNEncoderLiquidNetworkModel(nn.Module):
+    """
+    CNN Encoder + Liquid Neural Network for NILM.
+
+    Architecture:
+        Input -> CNN Encoder (feature extraction) -> Liquid Layer (ODE) -> FC -> Output
+
+    The CNN encoder extracts local temporal patterns and features,
+    which are then processed by the liquid layer for temporal dynamics.
+    """
+    def __init__(self, input_size, hidden_size, output_size, dt=0.1,
+                 num_conv_layers=3, kernel_size=5, dropout=0.1):
+        super(CNNEncoderLiquidNetworkModel, self).__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.output_size = output_size
+        self.dt = dt
+
+        # CNN Encoder
+        self.conv_layers = nn.ModuleList()
+        in_channels = input_size
+        out_channels = hidden_size // 4
+
+        for i in range(num_conv_layers):
+            self.conv_layers.append(nn.Sequential(
+                nn.Conv1d(in_channels, out_channels, kernel_size=kernel_size, padding=kernel_size//2),
+                nn.BatchNorm1d(out_channels),
+                nn.ReLU(),
+                nn.Dropout(dropout)
+            ))
+            in_channels = out_channels
+            out_channels = min(out_channels * 2, hidden_size)
+
+        # Project CNN output to hidden size
+        self.encoder_projection = nn.Linear(in_channels, hidden_size)
+
+        # Liquid layer
+        self.liquid = LiquidODECell(hidden_size, hidden_size, dt=dt)
+
+        # Output layer
+        self.fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        """
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, input_size)
+
+        Returns:
+            Output tensor of shape (batch_size, output_size)
+        """
+        batch_size, seq_len, _ = x.size()
+
+        # CNN expects (batch_size, channels, seq_len)
+        x = x.transpose(1, 2)  # (batch_size, input_size, seq_len)
+
+        # Apply CNN encoder
+        for conv_layer in self.conv_layers:
+            x = conv_layer(x)
+
+        # Back to (batch_size, seq_len, features)
+        x = x.transpose(1, 2)  # (batch_size, seq_len, features)
+
+        # Project to hidden size
+        x = self.encoder_projection(x)  # (batch_size, seq_len, hidden_size)
+
+        # Process through liquid layer
+        h = torch.zeros(batch_size, self.hidden_size).to(x.device)
+        for t in range(seq_len):
+            h = self.liquid(x[:, t, :], h)
+
+        # Final prediction
+        output = self.fc(h)  # (batch_size, output_size)
+
+        return output
+
+
+class TransformerEncoderLiquidNetworkModel(nn.Module):
+    """
+    Transformer Encoder + Liquid Neural Network for NILM.
+
+    Architecture:
+        Input -> Transformer Encoder (self-attention) -> Liquid Layer (ODE) -> FC -> Output
+
+    The Transformer encoder captures long-range dependencies and global patterns,
+    which are then refined by the liquid layer for temporal dynamics.
+    """
+    def __init__(self, input_size, hidden_size, output_size, dt=0.1,
+                 num_encoder_layers=2, num_heads=4, dropout=0.1):
+        super(TransformerEncoderLiquidNetworkModel, self).__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.output_size = output_size
+        self.dt = dt
+
+        # Input projection
+        self.input_projection = nn.Linear(input_size, hidden_size)
+
+        # Transformer Encoder
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_size,
+            nhead=num_heads,
+            dim_feedforward=hidden_size * 4,
+            dropout=dropout,
+            batch_first=True
+        )
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_encoder_layers)
+
+        # Liquid layer
+        self.liquid = LiquidODECell(hidden_size, hidden_size, dt=dt)
+
+        # Output layer
+        self.fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        """
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, input_size)
+
+        Returns:
+            Output tensor of shape (batch_size, output_size)
+        """
+        batch_size, seq_len, _ = x.size()
+
+        # Project input
+        x = self.input_projection(x)  # (batch_size, seq_len, hidden_size)
+
+        # Apply Transformer encoder
+        x = self.transformer_encoder(x)  # (batch_size, seq_len, hidden_size)
+
+        # Process through liquid layer
+        h = torch.zeros(batch_size, self.hidden_size).to(x.device)
+        for t in range(seq_len):
+            h = self.liquid(x[:, t, :], h)
+
+        # Final prediction
+        output = self.fc(h)  # (batch_size, output_size)
+
+        return output
+
+
+class BidirectionalEncoderLiquidNetworkModel(nn.Module):
+    """
+    Bidirectional Encoder + Liquid Neural Network for NILM.
+
+    Architecture:
+        Input -> Bidirectional Liquid Layers (forward + backward) -> Concatenate -> FC -> Output
+
+    The bidirectional encoder processes the sequence in both directions,
+    capturing context from past and future for better predictions.
+    """
+    def __init__(self, input_size, hidden_size, output_size, dt=0.1, dropout=0.1):
+        super(BidirectionalEncoderLiquidNetworkModel, self).__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.output_size = output_size
+        self.dt = dt
+
+        # Input projection
+        self.input_layer = nn.Linear(input_size, hidden_size)
+
+        # Forward and backward liquid layers
+        self.liquid_forward = LiquidODECell(hidden_size, hidden_size, dt=dt)
+        self.liquid_backward = LiquidODECell(hidden_size, hidden_size, dt=dt)
+
+        # Dropout for regularization
+        self.dropout = nn.Dropout(dropout)
+
+        # Output layer (takes concatenated forward + backward)
+        self.fc = nn.Linear(hidden_size * 2, output_size)
+
+    def forward(self, x):
+        """
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, input_size)
+
+        Returns:
+            Output tensor of shape (batch_size, output_size)
+        """
+        batch_size, seq_len, _ = x.size()
+
+        # Project input
+        x = self.input_layer(x)  # (batch_size, seq_len, hidden_size)
+
+        # Forward pass
+        h_forward = torch.zeros(batch_size, self.hidden_size).to(x.device)
+        for t in range(seq_len):
+            h_forward = self.liquid_forward(x[:, t, :], h_forward)
+
+        # Backward pass
+        h_backward = torch.zeros(batch_size, self.hidden_size).to(x.device)
+        for t in range(seq_len - 1, -1, -1):
+            h_backward = self.liquid_backward(x[:, t, :], h_backward)
+
+        # Concatenate forward and backward representations
+        h_combined = torch.cat([h_forward, h_backward], dim=1)  # (batch_size, hidden_size * 2)
+        h_combined = self.dropout(h_combined)
+
+        # Final prediction
+        output = self.fc(h_combined)  # (batch_size, output_size)
+
+        return output
