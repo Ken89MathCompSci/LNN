@@ -389,7 +389,7 @@ def run_comprehensive_comparison(augmentation='mixed', epochs=20):
 
                 all_results[appliance_name][model_type] = result
 
-                print(f"    ✅ {result['model_name']:35s} | F1: {result['metrics']['f1']:.4f} | MAE: {result['metrics']['mae']:.2f}")
+                print(f"    ✅ {result['model_name']:35s} | F1: {result['metrics']['f1']:.4f} | MAE: {result['metrics']['mae']:.2f} | SAE: {result['metrics']['sae']:.4f}")
 
             except Exception as e:
                 print(f"    ❌ {model_type}: {str(e)}")
@@ -418,6 +418,56 @@ def run_comprehensive_comparison(augmentation='mixed', epochs=20):
 
         avg_f1 = np.mean(scores) if scores else 0.0
         row += f" | {avg_f1:>10.4f}"
+        print(row)
+
+    # Create SAE comparison table
+    print("\n\n" + "=" * 80)
+    print("FINAL COMPARISON - SAE SCORES")
+    print("=" * 80)
+    print(f"{'Model':<35s} | {'Dishwasher':>10s} | {'Fridge':>10s} | {'Microwave':>10s} | {'Washer':>10s} | {'Avg':>10s}")
+    print("-" * 80)
+
+    for model_type in model_types:
+        model_name = all_results[appliances[0]][model_type]['model_name'] if model_type in all_results[appliances[0]] else model_type
+
+        scores = []
+        row = f"{model_name:<35s}"
+
+        for appliance in appliances:
+            if model_type in all_results[appliance]:
+                sae = all_results[appliance][model_type]['metrics']['sae']
+                row += f" | {sae:>10.4f}"
+                scores.append(sae)
+            else:
+                row += f" | {'N/A':>10s}"
+
+        avg_sae = np.mean(scores) if scores else 0.0
+        row += f" | {avg_sae:>10.4f}"
+        print(row)
+
+    # Create MAE comparison table
+    print("\n\n" + "=" * 80)
+    print("FINAL COMPARISON - MAE SCORES")
+    print("=" * 80)
+    print(f"{'Model':<35s} | {'Dishwasher':>10s} | {'Fridge':>10s} | {'Microwave':>10s} | {'Washer':>10s} | {'Avg':>10s}")
+    print("-" * 80)
+
+    for model_type in model_types:
+        model_name = all_results[appliances[0]][model_type]['model_name'] if model_type in all_results[appliances[0]] else model_type
+
+        scores = []
+        row = f"{model_name:<35s}"
+
+        for appliance in appliances:
+            if model_type in all_results[appliance]:
+                mae = all_results[appliance][model_type]['metrics']['mae']
+                row += f" | {mae:>10.4f}"
+                scores.append(mae)
+            else:
+                row += f" | {'N/A':>10s}"
+
+        avg_mae = np.mean(scores) if scores else 0.0
+        row += f" | {avg_mae:>10.4f}"
         print(row)
 
     # Save results
