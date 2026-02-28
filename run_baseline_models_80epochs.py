@@ -1,0 +1,461 @@
+"""
+Baseline Model Comparison — 80 Epochs
+======================================
+Runs all 5 baseline NILM models on the REDD dataset:
+  - GRU       (test_redd_specific_splits.py)
+  - LSTM      (test_lstm_redd_specific_splits.py)
+  - ResNet    (test_resnet_redd_specific_splits.py)
+  - TCN       (test_tcn_redd_specific_splits.py)
+  - Transformer (test_transformer_redd_specific_splits.py)
+
+Training improvements over original scripts:
+  - 80 epochs (up from 20)
+  - Early stopping patience = 20 (up from 5/10)
+  - ReduceLROnPlateau scheduler (factor=0.5, patience=8)
+  - Best weight restoration
+  - Gradient clipping (max_norm=1.0)
+
+Outputs:
+  - results/baseline_80epochs/mae_per_appliance.png
+  - results/baseline_80epochs/sae_per_appliance.png
+  - results/baseline_80epochs/f1_per_appliance.png
+  - results/baseline_80epochs/summary_all_metrics.png
+  - results/baseline_80epochs/f1_heatmap.png
+  - results/baseline_80epochs/training_curves_<model>.png  (x5)
+  - results/baseline_80epochs/results_summary.json
+"""
+
+import sys
+import os
+import torch
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import json
+import pickle
+from datetime import datetime
+from tqdm import tqdm
+
+sys.path.append('Source Code')
+
+from models import (
+    GRUModel,
+    LSTMModel,
+    ResNetModel,
+    TCNModel,
+    SimpleTransformerModel,
+)
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+
+EPOCHS    = 80
+PATIENCE  = 20
+LR        = 1e-3
+BATCH     = 32
+WIN       = 100
+STRIDE    = 5
+
+APPLIANCES  = ['dish washer', 'fridge', 'microwave', 'washer dryer']
+APP_LABELS  = ['Dish Washer', 'Fridge', 'Microwave', 'Washer Dryer']
+
+THRESHOLDS = {
+    'dish washer':  10.0,
+    'fridge':       10.0,
+    'microwave':    10.0,
+    'washer dryer':  0.5,
+}
+
+MODEL_LABELS = {
+    'gru':         'GRU',
+    'lstm':        'LSTM',
+    'resnet':      'ResNet',
+    'tcn':         'TCN',
+    'transformer': 'Transformer',
+}
+
+MODEL_COLORS = {
+    'gru':         '#4C72B0',
+    'lstm':        '#DD8452',
+    'resnet':      '#55A868',
+    'tcn':         '#C44E52',
+    'transformer': '#8172B2',
+}
+
+# ── Data ──────────────────────────────────────────────────────────────────────
+
+def load_data():
+    print("Loading REDD data...")
+    splits = {}
+    for split in ('train', 'val', 'test'):
+        with open(f'data/redd/{split}_small.pkl', 'rb') as f:
+            splits[split] = pickle.load(f)[0]
+    return splits
+
+
+def create_sequences(df, appliance_name, window_size=WIN, stride=STRIDE):
+    mains = df['main'].values
+    targets = df[appliance_name].values
+    X, y = [], []
+    for i in range(0, len(mains) - window_size, stride):
+        X.append(mains[i:i + window_size])
+        midpoint = i + window_size // 2
+        y.append(targets[midpoint])
+    return (
+        np.array(X, dtype=np.float32).reshape(-1, window_size, 1),
+        np.array(y, dtype=np.float32).reshape(-1, 1),
+    )
+
+
+class SimpleDataset(torch.utils.data.Dataset):
+    def __init__(self, X, y):
+        self.X = torch.from_numpy(X)
+        self.y = torch.from_numpy(y)
+
+    def __len__(self):
+        return len(self.X)
+
+    def __getitem__(self, idx):
+        return self.X[idx], self.y[idx]
+
+
+# ── Metrics ───────────────────────────────────────────────────────────────────
+
+def calculate_metrics(y_true, y_pred, threshold):
+    y_true = y_true.flatten()
+    y_pred = y_pred.flatten()
+
+    mae = float(np.mean(np.abs(y_true - y_pred)))
+
+    N = 100
+    num_periods = len(y_true) // N
+    diff = sum(
+        abs(np.sum(y_true[i*N:(i+1)*N]) - np.sum(y_pred[i*N:(i+1)*N]))
+        for i in range(num_periods)
+    )
+    sae = float(diff / (N * num_periods)) if num_periods > 0 else 0.0
+
+    t_bin = (y_true > threshold).astype(int)
+    p_bin = (y_pred > threshold).astype(int)
+    tp = int(np.sum((t_bin == 1) & (p_bin == 1)))
+    fp = int(np.sum((t_bin == 0) & (p_bin == 1)))
+    fn = int(np.sum((t_bin == 1) & (p_bin == 0)))
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall    = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+    return {'mae': mae, 'sae': sae, 'f1': float(f1),
+            'precision': float(precision), 'recall': float(recall)}
+
+
+# ── Model factory ─────────────────────────────────────────────────────────────
+
+def build_model(model_key):
+    if model_key == 'gru':
+        return GRUModel(input_size=1, hidden_size=128, num_layers=2,
+                        output_size=1, bidirectional=True)
+    if model_key == 'lstm':
+        return LSTMModel(input_size=1, hidden_size=128, num_layers=2,
+                         output_size=1, bidirectional=True)
+    if model_key == 'resnet':
+        return ResNetModel(input_size=1, output_size=1,
+                           layers=[2, 2, 2], base_width=32)
+    if model_key == 'tcn':
+        return TCNModel(input_size=1, output_size=1,
+                        num_channels=[32, 64, 128], kernel_size=3, dropout=0.2)
+    if model_key == 'transformer':
+        return SimpleTransformerModel(input_size=1, hidden_size=128, output_size=1,
+                                      num_layers=3, num_heads=4, dropout=0.1)
+    raise ValueError(f"Unknown model: {model_key}")
+
+
+# ── Training loop ─────────────────────────────────────────────────────────────
+
+def train_model(model_key, appliance_name, splits, device):
+    thr = THRESHOLDS[appliance_name]
+
+    # Build sequences
+    X_tr, y_tr = create_sequences(splits['train'], appliance_name)
+    X_va, y_va = create_sequences(splits['val'],   appliance_name)
+    X_te, y_te = create_sequences(splits['test'],  appliance_name)
+
+    # Normalize using training stats
+    mu, sigma = float(X_tr.mean()), float(X_tr.std()) + 1e-8
+    X_tr = (X_tr - mu) / sigma
+    X_va = (X_va - mu) / sigma
+    X_te = (X_te - mu) / sigma
+
+    tr_loader = torch.utils.data.DataLoader(
+        SimpleDataset(X_tr, y_tr), batch_size=BATCH, shuffle=True,  drop_last=False)
+    va_loader = torch.utils.data.DataLoader(
+        SimpleDataset(X_va, y_va), batch_size=BATCH, shuffle=False, drop_last=False)
+    te_loader = torch.utils.data.DataLoader(
+        SimpleDataset(X_te, y_te), batch_size=BATCH, shuffle=False, drop_last=False)
+
+    model = build_model(model_key).to(device)
+    criterion = torch.nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=8, min_lr=1e-5)
+
+    best_val  = float('inf')
+    best_state = None
+    no_improve = 0
+    train_losses, val_losses = [], []
+
+    for epoch in range(EPOCHS):
+        # ── Train ──
+        model.train()
+        ep_loss = 0.0
+        for xb, yb in tqdm(tr_loader, desc=f"[{MODEL_LABELS[model_key]} | {appliance_name}] Epoch {epoch+1}/{EPOCHS}", leave=False):
+            xb, yb = xb.to(device), yb.to(device)
+            optimizer.zero_grad()
+            loss = criterion(model(xb), yb)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            ep_loss += loss.item()
+        avg_tr = ep_loss / len(tr_loader)
+        train_losses.append(avg_tr)
+
+        # ── Validate ──
+        model.eval()
+        vl_loss = 0.0
+        with torch.no_grad():
+            for xb, yb in va_loader:
+                xb, yb = xb.to(device), yb.to(device)
+                vl_loss += criterion(model(xb), yb).item()
+        avg_va = vl_loss / len(va_loader)
+        val_losses.append(avg_va)
+        scheduler.step(avg_va)
+
+        print(f"  [{MODEL_LABELS[model_key]} | {appliance_name}] "
+              f"Epoch {epoch+1:3d}/{EPOCHS}  "
+              f"train={avg_tr:.5f}  val={avg_va:.5f}  "
+              f"lr={optimizer.param_groups[0]['lr']:.2e}")
+
+        if avg_va < best_val:
+            best_val = avg_va
+            best_state = {k: v.clone() for k, v in model.state_dict().items()}
+            no_improve = 0
+        else:
+            no_improve += 1
+            if no_improve >= PATIENCE:
+                print(f"  Early stopping at epoch {epoch+1}")
+                break
+
+    # ── Test with best weights ──
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    model.eval()
+    preds, trues = [], []
+    with torch.no_grad():
+        for xb, yb in te_loader:
+            preds.append(model(xb.to(device)).cpu().numpy())
+            trues.append(yb.numpy())
+    y_pred = np.concatenate(preds)
+    y_true = np.concatenate(trues)
+    metrics = calculate_metrics(y_true, y_pred, thr)
+
+    return metrics, train_losses, val_losses
+
+
+# ── Plotting helpers ──────────────────────────────────────────────────────────
+
+def bar_chart(all_results, metric_key, metric_label, save_path):
+    model_keys = list(MODEL_LABELS.keys())
+    x = np.arange(len(APPLIANCES))
+    width = 0.15
+    fig, ax = plt.subplots(figsize=(12, 5))
+    for i, mk in enumerate(model_keys):
+        vals = [all_results.get(mk, {}).get(app, {}).get(metric_key, np.nan)
+                for app in APPLIANCES]
+        offset = (i - len(model_keys) / 2 + 0.5) * width
+        bars = ax.bar(x + offset, vals, width, label=MODEL_LABELS[mk],
+                      color=MODEL_COLORS[mk], alpha=0.85)
+        for bar, v in zip(bars, vals):
+            if not np.isnan(v):
+                ax.text(bar.get_x() + bar.get_width() / 2,
+                        bar.get_height() + 0.005 * ax.get_ylim()[1],
+                        f'{v:.2f}', ha='center', va='bottom', fontsize=7)
+    ax.set_xlabel('Appliance')
+    ax.set_ylabel(metric_label)
+    ax.set_title(f'{metric_label} per Appliance — Baseline Models (80 epochs)')
+    ax.set_xticks(x)
+    ax.set_xticklabels(APP_LABELS)
+    ax.legend(loc='upper right', fontsize=8)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    print(f"  Saved → {save_path}")
+
+
+def summary_chart(all_results, save_path):
+    metrics = [('mae', 'MAE'), ('sae', 'SAE'), ('f1', 'F1')]
+    model_keys = list(MODEL_LABELS.keys())
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    for ax, (mk_key, mk_label) in zip(axes, metrics):
+        vals = []
+        for model in model_keys:
+            scores = [all_results.get(model, {}).get(app, {}).get(mk_key, np.nan)
+                      for app in APPLIANCES]
+            vals.append(np.nanmean(scores))
+        colors = [MODEL_COLORS[m] for m in model_keys]
+        bars = ax.bar(list(MODEL_LABELS.values()), vals, color=colors, alpha=0.85)
+        for bar, v in zip(bars, vals):
+            ax.text(bar.get_x() + bar.get_width() / 2,
+                    bar.get_height() + 0.005 * max(v for v in vals if not np.isnan(v)),
+                    f'{v:.3f}', ha='center', va='bottom', fontsize=8)
+        ax.set_title(f'Average {mk_label}')
+        ax.set_ylabel(mk_label)
+        ax.tick_params(axis='x', rotation=15)
+    fig.suptitle('Summary — Baseline Models Averaged Over All Appliances (80 epochs)', fontsize=11)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    print(f"  Saved → {save_path}")
+
+
+def f1_heatmap(all_results, save_path):
+    model_keys = list(MODEL_LABELS.keys())
+    data = np.full((len(APPLIANCES), len(model_keys)), np.nan)
+    for j, mk in enumerate(model_keys):
+        for i, app in enumerate(APPLIANCES):
+            data[i, j] = all_results.get(mk, {}).get(app, {}).get('f1', np.nan)
+    fig, ax = plt.subplots(figsize=(9, 4))
+    im = ax.imshow(data, aspect='auto', cmap='RdYlGn', vmin=0, vmax=1)
+    ax.set_xticks(range(len(model_keys)))
+    ax.set_xticklabels(list(MODEL_LABELS.values()), fontsize=9)
+    ax.set_yticks(range(len(APPLIANCES)))
+    ax.set_yticklabels(APP_LABELS, fontsize=9)
+    for i in range(len(APPLIANCES)):
+        for j in range(len(model_keys)):
+            val = data[i, j]
+            if not np.isnan(val):
+                ax.text(j, i, f'{val:.2f}', ha='center', va='center', fontsize=9,
+                        color='black' if 0.3 < val < 0.75 else 'white')
+    plt.colorbar(im, ax=ax, label='F1 Score')
+    ax.set_title('F1 Score Heatmap — Baseline Models (80 epochs)')
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    print(f"  Saved → {save_path}")
+
+
+def training_curves(model_key, curves, save_path):
+    # curves = {appliance_name: (train_losses, val_losses)}
+    n = len(curves)
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    axes = axes.flatten()
+    for ax, (app, (tl, vl)) in zip(axes, curves.items()):
+        ax.plot(tl, label='Train', color='steelblue')
+        ax.plot(vl, label='Val',   color='tomato')
+        ax.set_title(app.title())
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('MSE Loss')
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+    for ax in axes[n:]:
+        ax.set_visible(False)
+    fig.suptitle(f'Training Curves — {MODEL_LABELS[model_key]} (80 epochs)', fontsize=12)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    print(f"  Saved → {save_path}")
+
+
+# ── Console summary table ─────────────────────────────────────────────────────
+
+def print_table(all_results):
+    model_keys = list(MODEL_LABELS.keys())
+    divider = '─' * 80
+
+    for metric, label in [('f1', 'F1'), ('mae', 'MAE'), ('sae', 'SAE')]:
+        print(f"\n{'='*80}")
+        print(f"  {label} Comparison")
+        print(f"{'='*80}")
+        header = f"  {'Model':<16}" + ''.join(f"{a.title():<16}" for a in APP_LABELS) + f"{'Avg':<10}"
+        print(header)
+        print(divider)
+        for mk in model_keys:
+            vals = [all_results.get(mk, {}).get(app, {}).get(metric, float('nan'))
+                    for app in APPLIANCES]
+            avg  = np.nanmean(vals)
+            row  = f"  {MODEL_LABELS[mk]:<16}" + ''.join(f"{v:<16.4f}" for v in vals) + f"{avg:<10.4f}"
+            print(row)
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def main():
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Device: {device}")
+
+    # Check data files
+    for split in ('train', 'val', 'test'):
+        p = f'data/redd/{split}_small.pkl'
+        if not os.path.exists(p):
+            print(f"ERROR: {p} not found.")
+            sys.exit(1)
+
+    splits = load_data()
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    save_dir = os.path.join('results', f'baseline_80epochs_{timestamp}')
+    os.makedirs(save_dir, exist_ok=True)
+    print(f"Output directory: {save_dir}\n")
+
+    model_keys = list(MODEL_LABELS.keys())
+
+    # all_results[model_key][appliance] = metrics dict
+    all_results  = {mk: {} for mk in model_keys}
+    # all_curves[model_key][appliance] = (train_losses, val_losses)
+    all_curves   = {mk: {} for mk in model_keys}
+
+    for mk in model_keys:
+        print(f"\n{'#'*70}")
+        print(f"#  {MODEL_LABELS[mk]}")
+        print(f"{'#'*70}")
+        for app in APPLIANCES:
+            print(f"\n  ▶  {app}")
+            try:
+                metrics, tl, vl = train_model(mk, app, splits, device)
+                all_results[mk][app] = metrics
+                all_curves[mk][app]  = (tl, vl)
+                print(f"  ✅ {MODEL_LABELS[mk]:12s} | {app:15s} | "
+                      f"F1={metrics['f1']:.4f}  MAE={metrics['mae']:.2f}  SAE={metrics['sae']:.4f}")
+            except Exception as exc:
+                import traceback
+                print(f"  ❌ {MODEL_LABELS[mk]} / {app} failed: {exc}")
+                traceback.print_exc()
+
+    # ── Graphs ──
+    print("\nGenerating graphs...")
+    bar_chart(all_results, 'mae', 'MAE (W)',
+              os.path.join(save_dir, 'mae_per_appliance.png'))
+    bar_chart(all_results, 'sae', 'SAE',
+              os.path.join(save_dir, 'sae_per_appliance.png'))
+    bar_chart(all_results, 'f1',  'F1 Score',
+              os.path.join(save_dir, 'f1_per_appliance.png'))
+    summary_chart(all_results, os.path.join(save_dir, 'summary_all_metrics.png'))
+    f1_heatmap(all_results, os.path.join(save_dir, 'f1_heatmap.png'))
+
+    for mk in model_keys:
+        if all_curves[mk]:
+            training_curves(mk, all_curves[mk],
+                            os.path.join(save_dir, f'training_curves_{mk}.png'))
+
+    # ── Print tables ──
+    print_table(all_results)
+
+    # ── Save JSON ──
+    json_path = os.path.join(save_dir, 'results_summary.json')
+    with open(json_path, 'w') as f:
+        json.dump({'timestamp': timestamp, 'epochs': EPOCHS,
+                   'patience': PATIENCE, 'results': all_results}, f, indent=2)
+    print(f"\nJSON summary saved → {json_path}")
+    print(f"\nAll done.  Results in: {save_dir}")
+
+
+if __name__ == '__main__':
+    main()
