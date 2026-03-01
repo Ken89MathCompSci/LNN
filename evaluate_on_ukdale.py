@@ -2,6 +2,14 @@
 Evaluate ALL Models on UK-DALE Test Set
 =========================================
 Trains on REDD (train + val) → Evaluates on UK-DALE test pkl.
+
+Appliance handling:
+  Direct     : appliance exists in both REDD and UK-DALE
+               → trained on REDD, tested on UK-DALE  (cross-dataset)
+  Zero-shot  : appliance only in UK-DALE (kettle, toaster)
+               → model trained on closest REDD proxy (microwave),
+                 evaluated against actual UK-DALE ground truth
+
 Run one model per Colab session to avoid timeouts.
 
 Models (11 total):
@@ -99,6 +107,14 @@ APP_LABELS = {
 AUG_PROBS = {
     'dish washer': 0.3, 'fridge': 0.6,
     'microwave': 0.3,   'washer dryer': 0.3,
+    'kettle': 0.3,      'toaster': 0.3,
+}
+
+# For UK-DALE appliances not in REDD, use the closest REDD appliance for
+# training (zero-shot transfer). Evaluation is still on the actual appliance.
+PROXY_APPLIANCE = {
+    'kettle':  'microwave',   # both: short-burst, high-power
+    'toaster': 'microwave',   # similar power profile
 }
 
 # ── Model registry ────────────────────────────────────────────────────────────
@@ -270,12 +286,13 @@ def _fit(model, tr_loader, va_loader, device, aug_mode, aug_prob, is_lnn):
     return model
 
 
-def run_baseline(key, appliance, redd_train, redd_val, ukdale_test, device):
+def run_baseline(key, appliance, train_appliance, redd_train, redd_val, ukdale_test, device):
+    """train_appliance: column used from REDD for training (may differ for zero-shot)."""
     thr = THRESHOLDS.get(appliance, 10.0)
 
-    X_tr, y_tr = make_sequences_baseline(redd_train, appliance)
-    X_va, y_va = make_sequences_baseline(redd_val,   appliance)
-    X_te, y_te = make_sequences_baseline(ukdale_test, appliance)
+    X_tr, y_tr = make_sequences_baseline(redd_train,  train_appliance)
+    X_va, y_va = make_sequences_baseline(redd_val,    train_appliance)
+    X_te, y_te = make_sequences_baseline(ukdale_test, appliance)       # eval on actual
 
     mu, sig = float(X_tr.mean()), float(X_tr.std())+1e-8
     X_tr = (X_tr-mu)/sig;  X_va = (X_va-mu)/sig;  X_te = (X_te-mu)/sig
@@ -296,12 +313,13 @@ def run_baseline(key, appliance, redd_train, redd_val, ukdale_test, device):
     return metrics(np.concatenate(trues), np.concatenate(preds), thr)
 
 
-def run_lnn(key, appliance, redd_train, redd_val, ukdale_test, device):
+def run_lnn(key, appliance, train_appliance, redd_train, redd_val, ukdale_test, device):
+    """train_appliance: column used from REDD for training (may differ for zero-shot)."""
     thr = THRESHOLDS.get(appliance, 10.0)
 
-    X_tr, y_tr = make_sequences_lnn(redd_train, appliance)
-    X_va, y_va = make_sequences_lnn(redd_val,   appliance)
-    X_te, y_te = make_sequences_lnn(ukdale_test, appliance)
+    X_tr, y_tr = make_sequences_lnn(redd_train,  train_appliance)
+    X_va, y_va = make_sequences_lnn(redd_val,    train_appliance)
+    X_te, y_te = make_sequences_lnn(ukdale_test, appliance)            # eval on actual
 
     xm, xs = X_tr.mean(), X_tr.std()+1e-8
     ym, ys = y_tr.mean(), y_tr.std()+1e-8
@@ -316,7 +334,7 @@ def run_lnn(key, appliance, redd_train, redd_val, ukdale_test, device):
         DS(X_te, y_te.reshape(-1,1)), 128, shuffle=False)
 
     model = build_lnn(key).to(device)
-    aug_prob = AUG_PROBS.get(appliance, 0.3)
+    aug_prob = AUG_PROBS.get(train_appliance, 0.3)
     model = _fit(model, tr, va, device, 'mixed', aug_prob, is_lnn=True)
 
     model.eval()
@@ -378,14 +396,23 @@ SAVE_DIR = os.path.join('results', 'ukdale_eval')
 def _get_apps(redd_train, ukdale_test):
     ukdale_cols = set(ukdale_test.columns) - {'main'}
     redd_cols   = set(redd_train.columns)  - {'main'}
-    common      = sorted(ukdale_cols & redd_cols)
-    skipped     = sorted(ukdale_cols - redd_cols)
+    direct      = sorted(ukdale_cols & redd_cols)
+    zero_shot   = sorted(ukdale_cols - redd_cols)
+
     print(f"REDD appliances            : {sorted(redd_cols)}")
     print(f"UK-DALE appliances         : {sorted(ukdale_cols)}")
-    print(f"Testing on (intersection)  : {common}")
-    if skipped:
-        print(f"Skipped (no REDD training) : {skipped}")
-    apps = [a for a in APPLIANCES if a in ukdale_cols and a in redd_cols] or common
+    print(f"Direct (REDD→UK-DALE)      : {direct}")
+    if zero_shot:
+        for a in zero_shot:
+            proxy = PROXY_APPLIANCE.get(a)
+            if proxy:
+                print(f"Zero-shot (proxy)          : {a}  ← trained on '{proxy}'")
+            else:
+                print(f"Skipped (no proxy defined) : {a}")
+
+    # All UK-DALE appliances that have either a direct match or a proxy
+    apps = sorted(a for a in ukdale_cols
+                  if a in redd_cols or a in PROXY_APPLIANCE)
     return apps
 
 
@@ -398,14 +425,17 @@ def run_one_model(mk, redd_train, redd_val, ukdale_test, apps, device):
     print(f"#  {label}  [{group}]  (train: REDD → test: UK-DALE)")
     print(f"{'#'*65}")
 
+    redd_cols = set(redd_train.columns) - {'main'}
     results = {}
     for app in apps:
-        print(f"\n  ▶  {app}")
+        train_app = app if app in redd_cols else PROXY_APPLIANCE.get(app, app)
+        tag = f"zero-shot via '{train_app}'" if train_app != app else "direct"
+        print(f"\n  ▶  {app}  [{tag}]")
         try:
             if group == 'baseline':
-                m = run_baseline(mk, app, redd_train, redd_val, ukdale_test, device)
+                m = run_baseline(mk, app, train_app, redd_train, redd_val, ukdale_test, device)
             else:
-                m = run_lnn(mk, app, redd_train, redd_val, ukdale_test, device)
+                m = run_lnn(mk, app, train_app, redd_train, redd_val, ukdale_test, device)
             results[app] = m
             print(f"  ✅ {label:<22} | {app:<15} | "
                   f"F1={m['f1']:.4f}  MAE={m['mae']:.2f}  SAE={m['sae']:.4f}")

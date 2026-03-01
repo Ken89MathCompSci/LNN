@@ -1,13 +1,15 @@
 """
-UK-DALE → Test PKL
-===================
-Prepares a test pkl file from UK-DALE HDF5 so that already-trained
-models (trained on REDD) can be evaluated on UK-DALE appliances.
+UK-DALE → Train / Val / Test PKLs
+===================================
+Prepares train, val, and test pkl files from UK-DALE HDF5.
 
-Output: data/ukdale/test_small.pkl
-        Same format as data/redd/test_small.pkl:
-            pickle.load(f)[0]  →  pandas DataFrame
-            columns: ['main', 'kettle', 'toaster', ...]
+  data/ukdale/train_small.pkl  — 2012-11-09 → 2013-09-30
+  data/ukdale/val_small.pkl    — 2013-10-01 → 2013-12-31
+  data/ukdale/test_small.pkl   — 2014-01-01 → 2014-06-30
+
+Same format as REDD pkls:
+    pickle.load(f)[0]  →  pandas DataFrame
+    columns: ['main', 'kettle', 'toaster', ...]
 
 Usage:
     py preprocess_ukdale_to_pkl.py
@@ -28,7 +30,10 @@ import pandas as pd
 
 H5_PATH  = 'ukdale/ukdale.h5'
 BUILDING = 1
-OUT_PATH = 'data/ukdale/test_small.pkl'
+
+TRAIN_PATH = 'data/ukdale/train_small.pkl'
+VAL_PATH   = 'data/ukdale/val_small.pkl'
+OUT_PATH   = 'data/ukdale/test_small.pkl'
 
 # Resample to 1-minute intervals (matches REDD pkl resolution)
 RESAMPLE_FREQ = '1T'
@@ -36,9 +41,14 @@ RESAMPLE_FREQ = '1T'
 # Forward-fill gaps up to 60 minutes (60 steps at 1-min resolution)
 FFILL_LIMIT = 60
 
-# Test window — UK-DALE House 1 has data from 2012-11-09 to 2015-01-05
-TEST_START = '2014-01-01'
-TEST_END   = '2014-06-30'
+# UK-DALE House 1 has data from 2012-11-09 to 2015-01-05
+# Splits kept non-overlapping; test window used for evaluation
+TRAIN_START = '2012-11-09'
+TRAIN_END   = '2013-09-30'
+VAL_START   = '2013-10-01'
+VAL_END     = '2013-12-31'
+TEST_START  = '2014-01-01'
+TEST_END    = '2014-06-30'
 
 # Appliances to include → column name : meter ID
 # House 1 meter map (set PRINT_METERS=True to see all):
