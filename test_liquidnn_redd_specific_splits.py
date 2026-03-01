@@ -1,3 +1,4 @@
+
 import sys
 import os
 import torch
@@ -14,40 +15,84 @@ sys.path.append('Source Code')
 
 # Import from our modules
 from models import LiquidNetworkModel, AdvancedLiquidNetworkModel
-from utils import calculate_nilm_metrics, save_model
+from utils import save_model
 
-
-def get_threshold_for_appliance(appliance_name):
+def calculate_nilm_metrics(y_true, y_pred, threshold=10):
     """
-    Get appropriate power threshold for on/off detection based on appliance characteristics
-
+    Calculate NILM-specific metrics with custom SAE calculation
+    
     Args:
-        appliance_name: Name of the appliance
+        y_true: Ground truth values
+        y_pred: Predicted values
+        threshold: Power threshold for on/off state (Watts)
 
     Returns:
-        Power threshold in watts
+        Dictionary of metrics
     """
-    # Base thresholds (can be overridden by sweep)
-    if appliance_name == 'washer dryer':
-        return 0.5  # Very low threshold for washer dryer
+    # Flatten arrays
+    y_true = y_true.flatten()
+    y_pred = y_pred.flatten()
+
+    # Mean Absolute Error (MAE)
+    mae = np.mean(np.abs(y_true - y_pred))
+    
+    # Root Mean Square Error (RMSE)
+    rmse = np.sqrt(np.mean(np.square(y_true - y_pred)))
+    
+    # Normalized Error in Total Energy (NETE)
+    energy_true = np.sum(y_true)
+    energy_pred = np.sum(y_pred)
+    if energy_true > 0:
+        nete = np.abs(energy_true - energy_pred) / energy_true
     else:
-        return 10.0  # Standard threshold for other appliances
-
-
-def find_best_threshold(y_true, y_pred, appliance_name, start=0.1, stop=1.0, step=0.1):
-    """
-    Sweep thresholds to maximize F1 on given targets/preds.
-    """
-    best_f1 = -1.0
-    best_threshold = get_threshold_for_appliance(appliance_name)
-    t = start
-    while t <= stop + 1e-9:
-        metrics = calculate_nilm_metrics(y_true, y_pred, threshold=t)
-        if metrics['f1'] > best_f1:
-            best_f1 = metrics['f1']
-            best_threshold = t
-        t = round(t + step, 10)
-    return best_threshold, best_f1
+        nete = np.inf
+    
+    # Custom SAE calculation matching the user's experiment
+    N = 100  # Window size used in sequence creation
+    num_period = int(len(y_true) / N)
+    diff = 0
+    for i in range(num_period):
+        diff += abs(np.sum(y_true[i * N: (i + 1) * N]) - np.sum(y_pred[i * N: (i + 1) * N]))
+    sae = diff / (N * num_period)
+    
+    # State Accuracy Error (SAE) - traditional calculation for comparison
+    y_true_binary = y_true > threshold
+    y_pred_binary = y_pred > threshold
+    
+    # Calculate confusion matrix components
+    tp = np.sum((y_true_binary == 1) & (y_pred_binary == 1))
+    tn = np.sum((y_true_binary == 0) & (y_pred_binary == 0))
+    fp = np.sum((y_true_binary == 0) & (y_pred_binary == 1))
+    fn = np.sum((y_true_binary == 1) & (y_pred_binary == 0))
+    
+    total_samples = len(y_true_binary)
+    if total_samples > 0:
+        state_accuracy = (tp + tn) / total_samples
+        traditional_sae = 1.0 - state_accuracy
+    else:
+        traditional_sae = 0.0
+    
+    # Calculate precision, recall, and F1 score
+    precision = 0.0
+    recall = 0.0
+    f1 = 0.0
+    
+    if np.sum(y_true_binary) > 0 or np.sum(y_pred_binary) > 0:
+        from sklearn.metrics import precision_score, recall_score, f1_score
+        precision = precision_score(y_true_binary, y_pred_binary, zero_division=0)
+        recall = recall_score(y_true_binary, y_pred_binary, zero_division=0)
+        f1 = f1_score(y_true_binary, y_pred_binary, zero_division=0)
+    
+    return {
+        'mae': mae,
+        'rmse': rmse,
+        'nete': nete,
+        'sae': sae,  # Custom SAE calculation
+        'traditional_sae': traditional_sae,  # Traditional SAE for comparison
+        'precision': precision,
+        'recall': recall,
+        'f1': f1
+    }
 
 class REDDSpecificDataset(torch.utils.data.Dataset):
     """
@@ -148,7 +193,7 @@ def create_sequences(data, window_size=100, target_size=1):
 
 def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_size=100,
                                             hidden_size=128, num_layers=2, dt=0.1, advanced=True,
-                                            epochs=20, lr=0.001, patience=10, save_dir='models/liquidnn_redd_specific'):
+                                            epochs=50, lr=0.001, save_dir='models/liquidnn_redd_specific'):
     """
     Train Liquid Neural Network model on a specific REDD appliance with the exact splits you specified
     
@@ -235,18 +280,14 @@ def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_
     # Loss function and optimizer
     criterion = torch.nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    
     # Training history
     history = {
         'train_loss': [],
         'val_loss': [],
-        'train_metrics': [],
         'val_metrics': []
     }
     
-    # Early stopping variables
-    best_val_loss = float('inf')
-    counter = 0
-    best_model_path = None
     
     print(f"Starting {model_name} training for {appliance_name}...")
     
@@ -255,8 +296,6 @@ def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_
         # Training phase
         model.train()
         train_loss = 0.0
-        train_targets = []
-        train_outputs = []
         
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
         for inputs, targets in progress_bar:
@@ -279,21 +318,10 @@ def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_
             # Update statistics
             train_loss += loss.item()
             progress_bar.set_postfix({'loss': loss.item()})
-
-            # Collect for train metrics
-            train_targets.append(targets.detach().cpu().numpy())
-            train_outputs.append(outputs.detach().cpu().numpy())
         
         # Calculate average training loss
         avg_train_loss = train_loss / len(train_loader)
         history['train_loss'].append(avg_train_loss)
-
-        # Training metrics
-        train_targets = np.concatenate(train_targets)
-        train_outputs = np.concatenate(train_outputs)
-        train_threshold = get_threshold_for_appliance(appliance_name)
-        train_metrics = calculate_nilm_metrics(train_targets, train_outputs, threshold=train_threshold)
-        history['train_metrics'].append(train_metrics)
         
         # Validation phase
         model.eval()
@@ -322,51 +350,38 @@ def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_
         # Calculate average validation loss
         avg_val_loss = val_loss / len(val_loader)
         history['val_loss'].append(avg_val_loss)
+        
         # Calculate NILM metrics
         all_targets = np.concatenate(all_targets)
         all_outputs = np.concatenate(all_outputs)
-        val_threshold = get_threshold_for_appliance(appliance_name)
-        metrics = calculate_nilm_metrics(all_targets, all_outputs, threshold=val_threshold)
+        metrics = calculate_nilm_metrics(all_targets, all_outputs)
         history['val_metrics'].append(metrics)
         
         # Print epoch stats
         print(f"Epoch {epoch+1}/{epochs}, Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}, "
               f"Val MAE: {metrics['mae']:.2f}, Val F1: {metrics['f1']:.4f}")
         
-        # Early stopping check
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            counter = 0
-            
-            # Save best model
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            best_model_path = os.path.join(save_dir, f"{model_name}_redd_{appliance_name.replace(' ', '_')}_best.pth")
-            
-            # Save model with metadata
-            model_params = {
-                'input_size': input_size,
-                'output_size': output_size,
-                'hidden_size': hidden_size,
-                'num_layers': num_layers if advanced else 1,
-                'dt': dt,
-                'advanced': advanced
-            }
-            
-            train_params = {
-                'lr': lr,
-                'epochs': epochs,
-                'patience': patience
-            }
-            
-            save_model(model, model_params, train_params, metrics, best_model_path)
-            print(f"Model saved to {best_model_path}")
-        else:
-            counter += 1
-            print(f"EarlyStopping counter: {counter} out of {patience}")
-            
-            if counter >= patience:
-                print("Early stopping triggered")
-                break
+        # Save model after each epoch (no early stopping)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        model_path = os.path.join(save_dir, f"{model_name}_redd_{appliance_name.replace(' ', '_')}_epoch_{epoch+1}.pth")
+        
+        # Save model with metadata
+        model_params = {
+            'input_size': input_size,
+            'output_size': output_size,
+            'hidden_size': hidden_size,
+            'num_layers': num_layers if advanced else 1,
+            'dt': dt,
+            'advanced': advanced
+        }
+        
+        train_params = {
+            'lr': lr,
+            'epochs': epochs
+        }
+        
+        save_model(model, model_params, train_params, metrics, model_path)
+        print(f"Model saved to {model_path}")
     
     print("Training completed!")
     
@@ -401,109 +416,118 @@ def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_
     # Calculate test metrics
     all_test_targets = np.concatenate(all_test_targets)
     all_test_outputs = np.concatenate(all_test_outputs)
-
-    # Find best threshold on validation outputs (F1) if washer dryer
-    if appliance_name == 'washer dryer':
-        best_thresh, best_f1 = find_best_threshold(all_targets, all_outputs, appliance_name, start=0.1, stop=1.0, step=0.1)
-        print(f"Washer dryer best val threshold: {best_thresh:.3f} (val F1={best_f1:.4f})")
-        threshold = best_thresh
-    else:
-        threshold = get_threshold_for_appliance(appliance_name)
-
-    test_metrics = calculate_nilm_metrics(all_test_targets, all_test_outputs, threshold=threshold)
+    test_metrics = calculate_nilm_metrics(all_test_targets, all_test_outputs)
     
     print(f"Test Loss: {avg_test_loss:.6f}")
     print(f"Test Metrics: {test_metrics}")
-
-    # Aggregate means/variances for train/val metrics
-    train_mae_series = [m['mae'] for m in history['train_metrics']]
-    val_mae_series = [m['mae'] for m in history['val_metrics']]
-    train_sae_series = [m['sae'] for m in history['train_metrics']]
-    val_sae_series = [m['sae'] for m in history['val_metrics']]
-    train_f1_series = [m['f1'] for m in history['train_metrics']]
-    val_f1_series = [m['f1'] for m in history['val_metrics']]
-
-    aggregates = {
-        'train_loss_mean': float(np.mean(history['train_loss'])) if history['train_loss'] else None,
-        'train_loss_var': float(np.var(history['train_loss'])) if history['train_loss'] else None,
-        'val_loss_mean': float(np.mean(history['val_loss'])) if history['val_loss'] else None,
-        'val_loss_var': float(np.var(history['val_loss'])) if history['val_loss'] else None,
-        'train_mae_mean': float(np.mean(train_mae_series)) if train_mae_series else None,
-        'train_mae_var': float(np.var(train_mae_series)) if train_mae_series else None,
-        'val_mae_mean': float(np.mean(val_mae_series)) if val_mae_series else None,
-        'val_mae_var': float(np.var(val_mae_series)) if val_mae_series else None,
-        'train_sae_mean': float(np.mean(train_sae_series)) if train_sae_series else None,
-        'train_sae_var': float(np.var(train_sae_series)) if train_sae_series else None,
-        'val_sae_mean': float(np.mean(val_sae_series)) if val_sae_series else None,
-        'val_sae_var': float(np.var(val_sae_series)) if val_sae_series else None,
-        'train_f1_mean': float(np.mean(train_f1_series)) if train_f1_series else None,
-        'train_f1_var': float(np.var(train_f1_series)) if train_f1_series else None,
-        'val_f1_mean': float(np.mean(val_f1_series)) if val_f1_series else None,
-        'val_f1_var': float(np.var(val_f1_series)) if val_f1_series else None,
-        'test_mae': float(test_metrics['mae']),
-        'test_sae': float(test_metrics['sae']),
-        'test_f1': float(test_metrics['f1']),
-        'test_loss': float(avg_test_loss)
-    }
-
-    print("Aggregates (mean/variance):")
-    print(json.dumps(aggregates, indent=2))
     
-    # Plot metrics (loss, MAE, SAE, F1)
+    # Plot comprehensive training history
     plt.figure(figsize=(15, 10))
-
-    # Loss
-    plt.subplot(2, 2, 1)
-    plt.plot(history['train_loss'], label='Train Loss', color='blue')
-    plt.plot(history['val_loss'], label='Val Loss', color='red')
-    plt.title(f'Loss - {appliance_name}')
+    
+    # Training and Validation Loss
+    plt.subplot(2, 3, 1)
+    plt.plot(history['train_loss'], label='Train Loss', color='blue', linewidth=2)
+    plt.plot(history['val_loss'], label='Validation Loss', color='red', linewidth=2)
+    plt.title(f'Training and Validation Loss - {appliance_name}')
     plt.xlabel('Epoch')
-    plt.ylabel('MSE Loss')
+    plt.ylabel('Loss (MSE)')
     plt.legend()
     plt.grid(True, alpha=0.3)
-
-    # MAE
-    plt.subplot(2, 2, 2)
-    train_mae = [m['mae'] for m in history['train_metrics']]
-    val_mae = [m['mae'] for m in history['val_metrics']]
-    plt.plot(train_mae, label='Train MAE', color='blue')
-    plt.plot(val_mae, label='Val MAE', color='red')
-    plt.axhline(test_metrics['mae'], label='Test MAE', color='green', linestyle='--')
-    plt.title(f'MAE - {appliance_name}')
+    
+    # Training and Validation MAE
+    plt.subplot(2, 3, 2)
+    train_mae = [calculate_nilm_metrics(y_train[i:i+1], y_train[i:i+1])['mae'] for i in range(0, len(y_train), len(y_train)//10)] if len(y_train) > 0 else []
+    val_mae = [metrics['mae'] for metrics in history['val_metrics']]
+    plt.plot(val_mae, label='Validation MAE', color='red', linewidth=2)
+    if train_mae:
+        plt.plot(range(0, len(history['train_loss']), len(history['train_loss'])//len(train_mae)), train_mae, 
+                label='Train MAE (sampled)', color='blue', linewidth=2, linestyle='--')
+    plt.title(f'Training and Validation MAE - {appliance_name}')
     plt.xlabel('Epoch')
     plt.ylabel('MAE')
     plt.legend()
     plt.grid(True, alpha=0.3)
-
-    # SAE
-    plt.subplot(2, 2, 3)
-    train_sae = [m['sae'] for m in history['train_metrics']]
-    val_sae = [m['sae'] for m in history['val_metrics']]
-    plt.plot(train_sae, label='Train SAE', color='blue')
-    plt.plot(val_sae, label='Val SAE', color='red')
-    plt.axhline(test_metrics['sae'], label='Test SAE', color='green', linestyle='--')
-    plt.title(f'SAE - {appliance_name}')
+    
+    # Training and Validation SAE
+    plt.subplot(2, 3, 3)
+    val_sae = [metrics['sae'] for metrics in history['val_metrics']]
+    plt.plot(val_sae, label='Validation SAE', color='red', linewidth=2)
+    plt.title(f'Validation SAE - {appliance_name}')
     plt.xlabel('Epoch')
     plt.ylabel('SAE')
     plt.legend()
     plt.grid(True, alpha=0.3)
-
-    # F1
-    plt.subplot(2, 2, 4)
-    train_f1 = [m['f1'] for m in history['train_metrics']]
-    val_f1 = [m['f1'] for m in history['val_metrics']]
-    plt.plot(train_f1, label='Train F1', color='blue')
-    plt.plot(val_f1, label='Val F1', color='red')
-    plt.axhline(test_metrics['f1'], label='Test F1', color='green', linestyle='--')
-    plt.title(f'F1 Score - {appliance_name}')
+    
+    # Precision and Recall
+    plt.subplot(2, 3, 4)
+    val_precision = [metrics['precision'] for metrics in history['val_metrics']]
+    val_recall = [metrics['recall'] for metrics in history['val_metrics']]
+    val_f1 = [metrics['f1'] for metrics in history['val_metrics']]
+    
+    # Filter out NaN values for plotting
+    precision_clean = [p for p in val_precision if not np.isnan(p)]
+    recall_clean = [r for r in val_recall if not np.isnan(r)]
+    f1_clean = [f for f in val_f1 if not np.isnan(f)]
+    
+    epochs_clean = range(len(precision_clean))
+    
+    plt.plot(epochs_clean, precision_clean, label='Precision', color='green', linewidth=2)
+    plt.plot(epochs_clean, recall_clean, label='Recall', color='orange', linewidth=2)
+    plt.plot(epochs_clean, f1_clean, label='F1 Score', color='purple', linewidth=2)
+    plt.title(f'Precision, Recall, and F1 Score - {appliance_name}')
     plt.xlabel('Epoch')
-    plt.ylabel('F1')
+    plt.ylabel('Score')
     plt.legend()
     plt.grid(True, alpha=0.3)
-
+    
+    # Training Loss Rate of Change
+    plt.subplot(2, 3, 5)
+    if len(history['train_loss']) > 1:
+        loss_diff = np.diff(history['train_loss'])
+        plt.plot(loss_diff, label='Training Loss Gradient', color='blue', linewidth=2)
+        plt.axhline(y=0, color='black', linestyle='--', alpha=0.5)
+        plt.title(f'Training Loss Rate of Change - {appliance_name}')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss Change')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+    
+    # Final Test Metrics Comparison
+    plt.subplot(2, 3, 6)
+    test_metrics_list = ['MAE', 'RMSE', 'SAE']
+    test_values = [test_metrics['mae'], test_metrics['rmse'], test_metrics['sae']]
+    colors = ['blue', 'red', 'green']
+    
+    bars = plt.bar(test_metrics_list, test_values, color=colors, alpha=0.7)
+    plt.title(f'Final Test Metrics - {appliance_name}')
+    plt.ylabel('Value')
+    
+    # Add value labels on bars
+    for bar, value in zip(bars, test_values):
+        plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + max(test_values)*0.01,
+                f'{value:.2f}', ha='center', va='bottom')
+    
     plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, f"{model_name}_redd_{appliance_name.replace(' ', '_')}_metrics.png"), dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(save_dir, f"{model_name}_redd_{appliance_name.replace(' ', '_')}_comprehensive_training_history.png"), dpi=300, bbox_inches='tight')
     plt.close()
+    
+    # Save detailed metrics to CSV for further analysis
+    metrics_data = {
+        'epoch': list(range(1, len(history['train_loss']) + 1)),
+        'train_loss': history['train_loss'],
+        'val_loss': history['val_loss'],
+        'val_mae': [metrics['mae'] for metrics in history['val_metrics']],
+        'val_sae': [metrics['sae'] for metrics in history['val_metrics']],
+        'val_precision': [metrics['precision'] for metrics in history['val_metrics']],
+        'val_recall': [metrics['recall'] for metrics in history['val_metrics']],
+        'val_f1': [metrics['f1'] for metrics in history['val_metrics']],
+        'val_rmse': [metrics['rmse'] for metrics in history['val_metrics']],
+        'val_nete': [metrics['nete'] for metrics in history['val_metrics']]
+    }
+    
+    import pandas as pd
+    metrics_df = pd.DataFrame(metrics_data)
+    metrics_df.to_csv(os.path.join(save_dir, f"{model_name}_redd_{appliance_name.replace(' ', '_')}_training_metrics.csv"), index=False)
     
     # Plot some prediction examples
     plt.figure(figsize=(12, 6))
@@ -535,15 +559,13 @@ def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_
         },
         'train_params': {
             'lr': lr,
-            'epochs': epochs,
-            'patience': patience
+            'epochs': epochs
         },
         'final_metrics': {
             'train_loss': history['train_loss'][-1] if history['train_loss'] else None,
             'val_loss': history['val_loss'][-1] if history['val_loss'] else None,
             'test_loss': avg_test_loss,
-            'test_metrics': {k: float(v) for k, v in test_metrics.items()},
-            'aggregates': aggregates
+            'test_metrics': {k: float(v) for k, v in test_metrics.items()}
         }
     }
     
@@ -553,7 +575,7 @@ def train_liquidnn_on_specific_redd_appliance(data_dict, appliance_name, window_
     return model, history, test_metrics
 
 def test_liquidnn_on_all_redd_appliances(window_size=100, hidden_size=128, num_layers=2, dt=0.1,
-                                       advanced=True, epochs=20, lr=0.001, patience=10):
+                                       advanced=True, epochs=50, lr=0.001):
     """
     Test Liquid Neural Network model on all specified REDD appliances with the exact splits you mentioned
     
@@ -586,11 +608,6 @@ def test_liquidnn_on_all_redd_appliances(window_size=100, hidden_size=128, num_l
     appliances = ['dish washer', 'fridge', 'microwave', 'washer dryer']
     
     for appliance_name in appliances:
-        appliance_window = window_size
-        appliance_epochs = epochs
-        appliance_lr = lr
-        appliance_advanced = advanced
-
         print(f"\n{'='*60}")
         print(f"Testing {model_type} on {appliance_name}")
         print(f"{'='*60}\n")
@@ -604,14 +621,13 @@ def test_liquidnn_on_all_redd_appliances(window_size=100, hidden_size=128, num_l
             model, history, test_metrics = train_liquidnn_on_specific_redd_appliance(
                 data_dict,
                 appliance_name=appliance_name,
-                    window_size=appliance_window,
-                    hidden_size=hidden_size,
-                    num_layers=num_layers,
-                    dt=dt,
-                    advanced=appliance_advanced,
-                    epochs=appliance_epochs,
-                    lr=appliance_lr,
-                    patience=patience,
+                window_size=window_size,
+                hidden_size=hidden_size,
+                num_layers=num_layers,
+                dt=dt,
+                advanced=advanced,
+                epochs=epochs,
+                lr=lr,
                 save_dir=appliance_dir
             )
             
@@ -667,8 +683,7 @@ def test_liquidnn_on_all_redd_appliances(window_size=100, hidden_size=128, num_l
         },
         'train_params': {
             'epochs': epochs,
-            'lr': lr,
-            'patience': patience
+            'lr': lr
         },
         'results': all_results
     }
@@ -705,9 +720,8 @@ if __name__ == "__main__":
         num_layers=2,
         dt=0.1,
         advanced=False,
-        epochs=20,
-        lr=0.001,
-        patience=10
+        epochs=50,
+        lr=0.001
     )
     
     # Print summary for standard Liquid Neural Network
@@ -727,9 +741,8 @@ if __name__ == "__main__":
         num_layers=2,
         dt=0.1,
         advanced=True,
-        epochs=20,
-        lr=0.001,
-        patience=10
+        epochs=50,
+        lr=0.001
     )
     
     # Print summary for advanced Liquid Neural Network

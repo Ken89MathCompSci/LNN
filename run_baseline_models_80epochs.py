@@ -198,6 +198,7 @@ def train_model(model_key, appliance_name, splits, device):
     best_state = None
     no_improve = 0
     train_losses, val_losses = [], []
+    val_mae_hist, val_sae_hist, val_f1_hist = [], [], []
 
     for epoch in range(EPOCHS):
         # ── Train ──
@@ -217,13 +218,25 @@ def train_model(model_key, appliance_name, splits, device):
         # ── Validate ──
         model.eval()
         vl_loss = 0.0
+        val_preds_ep, val_trues_ep = [], []
         with torch.no_grad():
             for xb, yb in va_loader:
                 xb, yb = xb.to(device), yb.to(device)
-                vl_loss += criterion(model(xb), yb).item()
+                out = model(xb)
+                vl_loss += criterion(out, yb).item()
+                val_preds_ep.append(out.cpu().numpy())
+                val_trues_ep.append(yb.cpu().numpy())
         avg_va = vl_loss / len(va_loader)
         val_losses.append(avg_va)
         scheduler.step(avg_va)
+
+        # Epoch-wise metrics on validation set
+        ep_pred = np.concatenate(val_preds_ep)
+        ep_true = np.concatenate(val_trues_ep)
+        ep_m = calculate_metrics(ep_true, ep_pred, thr)
+        val_mae_hist.append(ep_m['mae'])
+        val_sae_hist.append(ep_m['sae'])
+        val_f1_hist.append(ep_m['f1'])
 
         print(f"  [{MODEL_LABELS[model_key]} | {appliance_name}] "
               f"Epoch {epoch+1:3d}/{EPOCHS}  "
@@ -253,7 +266,7 @@ def train_model(model_key, appliance_name, splits, device):
     y_true = np.concatenate(trues)
     metrics = calculate_metrics(y_true, y_pred, thr)
 
-    return metrics, train_losses, val_losses
+    return metrics, train_losses, val_losses, val_mae_hist, val_sae_hist, val_f1_hist
 
 
 # ── Plotting helpers ──────────────────────────────────────────────────────────
@@ -360,6 +373,57 @@ def training_curves(model_key, curves, save_path):
     print(f"  Saved → {save_path}")
 
 
+def epoch_metric_curves(model_key, epoch_metrics, save_path):
+    """Val MAE, SAE, F1 across epochs for one model (all appliances)."""
+    metric_info = [('mae', 'MAE (W)'), ('sae', 'SAE'), ('f1', 'F1')]
+    n = len(APPLIANCES)
+    fig, axes = plt.subplots(n, 3, figsize=(15, 4 * n))
+    color = MODEL_COLORS[model_key]
+    for row, app in enumerate(APPLIANCES):
+        em = epoch_metrics.get(app, {})
+        for col, (mk_key, mk_label) in enumerate(metric_info):
+            ax = axes[row, col]
+            vals = em.get(mk_key, [])
+            if vals:
+                ax.plot(range(1, len(vals) + 1), vals, color=color)
+            ax.set_title(f'{app.title()} — {mk_label}')
+            ax.set_xlabel('Epoch')
+            ax.set_ylabel(mk_label)
+            ax.grid(True, alpha=0.3)
+    fig.suptitle(f'Val Metrics per Epoch — {MODEL_LABELS[model_key]} (80 epochs)', fontsize=12)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    print(f"  Saved → {save_path}")
+
+
+def combined_epoch_metric_curves(all_epoch_metrics, save_path):
+    """Val MAE, SAE, F1 across epochs — all models on the same axes, one row per appliance."""
+    metric_info = [('mae', 'MAE (W)'), ('sae', 'SAE'), ('f1', 'F1')]
+    n = len(APPLIANCES)
+    fig, axes = plt.subplots(n, 3, figsize=(15, 4 * n))
+    for row, app in enumerate(APPLIANCES):
+        for col, (mk_key, mk_label) in enumerate(metric_info):
+            ax = axes[row, col]
+            for model_key in MODEL_LABELS:
+                em = all_epoch_metrics.get(model_key, {}).get(app, {})
+                vals = em.get(mk_key, [])
+                if vals:
+                    ax.plot(range(1, len(vals) + 1), vals,
+                            label=MODEL_LABELS[model_key],
+                            color=MODEL_COLORS[model_key])
+            ax.set_title(f'{app.title()} — {mk_label}')
+            ax.set_xlabel('Epoch')
+            ax.set_ylabel(mk_label)
+            ax.legend(fontsize=7)
+            ax.grid(True, alpha=0.3)
+    fig.suptitle('Val Metrics per Epoch — All Baseline Models (80 epochs)', fontsize=12)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    print(f"  Saved → {save_path}")
+
+
 # ── Console summary table ─────────────────────────────────────────────────────
 
 def print_table(all_results):
@@ -392,6 +456,7 @@ def run_one_model(mk, splits, device):
 
     results = {}
     curves  = {}
+    epoch_metrics = {}
 
     print(f"\n{'#'*70}")
     print(f"#  {MODEL_LABELS[mk]}")
@@ -400,9 +465,10 @@ def run_one_model(mk, splits, device):
     for app in APPLIANCES:
         print(f"\n  ▶  {app}")
         try:
-            m, tl, vl = train_model(mk, app, splits, device)
+            m, tl, vl, mae_h, sae_h, f1_h = train_model(mk, app, splits, device)
             results[app] = m
             curves[app]  = (tl, vl)
+            epoch_metrics[app] = {'mae': mae_h, 'sae': sae_h, 'f1': f1_h}
             print(f"  ✅ {MODEL_LABELS[mk]:12s} | {app:15s} | "
                   f"F1={m['f1']:.4f}  MAE={m['mae']:.2f}  SAE={m['sae']:.4f}")
         except Exception as exc:
@@ -414,7 +480,8 @@ def run_one_model(mk, splits, device):
     json_path = os.path.join(SAVE_DIR, f'{mk}.json')
     with open(json_path, 'w') as f:
         json.dump({'model': mk, 'label': MODEL_LABELS[mk],
-                   'epochs': EPOCHS, 'results': results}, f, indent=2)
+                   'epochs': EPOCHS, 'results': results,
+                   'epoch_metrics': epoch_metrics}, f, indent=2)
     print(f"\n  JSON saved → {json_path}")
 
     # Save training curves
@@ -422,23 +489,30 @@ def run_one_model(mk, splits, device):
         training_curves(mk, curves,
                         os.path.join(SAVE_DIR, f'training_curves_{mk}.png'))
 
+    # Save per-model epoch metric curves (MAE/SAE/F1 vs epoch)
+    if epoch_metrics:
+        epoch_metric_curves(mk, epoch_metrics,
+                            os.path.join(SAVE_DIR, f'epoch_metrics_{mk}.png'))
+
 
 def load_all_results():
     """Read all per-model JSONs from SAVE_DIR and combine into all_results dict."""
     all_results = {}
+    all_epoch_metrics = {}
     for mk in MODEL_LABELS:
         path = os.path.join(SAVE_DIR, f'{mk}.json')
         if os.path.exists(path):
             with open(path) as f:
                 data = json.load(f)
             all_results[mk] = data['results']
+            all_epoch_metrics[mk] = data.get('epoch_metrics', {})
             print(f"  Loaded {MODEL_LABELS[mk]} from {path}")
         else:
             print(f"  Missing: {path}  (run --model {mk} first)")
-    return all_results
+    return all_results, all_epoch_metrics
 
 
-def generate_plots(all_results):
+def generate_plots(all_results, all_epoch_metrics=None):
     """Generate all comparison graphs from combined results."""
     os.makedirs(SAVE_DIR, exist_ok=True)
     print("\nGenerating graphs...")
@@ -450,6 +524,10 @@ def generate_plots(all_results):
               os.path.join(SAVE_DIR, 'f1_per_appliance.png'))
     summary_chart(all_results, os.path.join(SAVE_DIR, 'summary_all_metrics.png'))
     f1_heatmap(all_results,    os.path.join(SAVE_DIR, 'f1_heatmap.png'))
+    if all_epoch_metrics and any(all_epoch_metrics.values()):
+        combined_epoch_metric_curves(
+            all_epoch_metrics,
+            os.path.join(SAVE_DIR, 'epoch_metrics_all_models.png'))
     print_table(all_results)
 
     # Combined JSON
@@ -480,11 +558,11 @@ def main():
     # ── Plot-only mode ──
     if args.plot:
         print("Plot mode — loading saved results...")
-        all_results = load_all_results()
+        all_results, all_epoch_metrics = load_all_results()
         if not any(all_results.values()):
             print("No results found. Run at least one model first.")
             sys.exit(1)
-        generate_plots(all_results)
+        generate_plots(all_results, all_epoch_metrics)
         return
 
     # ── Training mode ──
@@ -511,8 +589,8 @@ def main():
     )
     if all_done:
         print("\nAll models complete — generating combined graphs...")
-        all_results = load_all_results()
-        generate_plots(all_results)
+        all_results, all_epoch_metrics = load_all_results()
+        generate_plots(all_results, all_epoch_metrics)
     else:
         missing = [mk for mk in MODEL_LABELS
                    if not os.path.exists(os.path.join(SAVE_DIR, f'{mk}.json'))]

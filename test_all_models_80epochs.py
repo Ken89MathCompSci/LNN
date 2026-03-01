@@ -230,6 +230,7 @@ def train_and_evaluate(
     counter         = 0
     train_losses    = []
     val_losses      = []
+    val_mae_hist, val_sae_hist, val_f1_hist = [], [], []
 
     for epoch in range(epochs):
         # ── Train ──
@@ -253,12 +254,24 @@ def train_and_evaluate(
         # ── Validate ──
         model.eval()
         val_loss = 0.0
+        val_preds_ep, val_trues_ep = [], []
         with torch.no_grad():
             for inputs, targets in val_loader:
                 inputs, targets = inputs.to(device), targets.to(device)
-                val_loss += criterion(model(inputs), targets).item()
+                out = model(inputs)
+                val_loss += criterion(out, targets).item()
+                val_preds_ep.append(out.cpu().numpy())
+                val_trues_ep.append(targets.cpu().numpy())
         avg_val = val_loss / len(val_loader)
         val_losses.append(avg_val)
+
+        # Epoch-wise metrics (denormalized)
+        ep_pred = np.concatenate(val_preds_ep) * y_std + y_mean
+        ep_true = np.concatenate(val_trues_ep) * y_std + y_mean
+        ep_m = calculate_nilm_metrics(ep_true, ep_pred, threshold=THRESHOLDS[appliance_name])
+        val_mae_hist.append(ep_m['mae'])
+        val_sae_hist.append(ep_m['sae'])
+        val_f1_hist.append(ep_m['f1'])
 
         # Step scheduler
         scheduler.step(avg_val)
@@ -303,6 +316,9 @@ def train_and_evaluate(
         'train_losses': train_losses,
         'val_losses':   val_losses,
         'epochs_run':   len(train_losses),
+        'val_mae_hist': val_mae_hist,
+        'val_sae_hist': val_sae_hist,
+        'val_f1_hist':  val_f1_hist,
     }
 
 
@@ -464,6 +480,38 @@ def plot_f1_heatmap(all_results, save_dir):
     print(f"  Saved: {path}")
 
 
+def plot_epoch_metrics_combined(all_results, save_dir):
+    """Val MAE, SAE, F1 across epochs — all models overlaid, one row per appliance."""
+    metric_info = [
+        ('val_mae_hist', 'MAE (W)'),
+        ('val_sae_hist', 'SAE'),
+        ('val_f1_hist',  'F1'),
+    ]
+    n = len(APPLIANCES)
+    fig, axes = plt.subplots(n, 3, figsize=(15, 4 * n))
+    for row, app in enumerate(APPLIANCES):
+        for col, (hist_key, mk_label) in enumerate(metric_info):
+            ax = axes[row, col]
+            for mt in MODEL_TYPES:
+                if mt not in all_results[app]:
+                    continue
+                vals = all_results[app][mt].get(hist_key, [])
+                if vals:
+                    ax.plot(range(1, len(vals) + 1), vals,
+                            label=MODEL_LABELS[mt], color=MODEL_COLORS[mt])
+            ax.set_title(f'{app.title()} — {mk_label}')
+            ax.set_xlabel('Epoch')
+            ax.set_ylabel(mk_label)
+            ax.legend(fontsize=7)
+            ax.grid(True, alpha=0.3)
+    fig.suptitle('Val Metrics per Epoch — All LNN Models (80 epochs)', fontsize=12)
+    plt.tight_layout()
+    path = os.path.join(save_dir, 'epoch_metrics_all_models.png')
+    plt.savefig(path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved: {path}")
+
+
 # ── Print tables ──────────────────────────────────────────────────────────────
 
 def print_table(all_results, metric_key, title):
@@ -543,6 +591,7 @@ def run(augmentation='none', epochs=80):
     plot_metric_per_appliance(all_results, 'f1',  'F1 Score',     save_dir)
     plot_summary_bar(all_results, save_dir)
     plot_f1_heatmap(all_results, save_dir)
+    plot_epoch_metrics_combined(all_results, save_dir)
 
     for app in APPLIANCES:
         plot_training_curves(all_results, app, save_dir)
