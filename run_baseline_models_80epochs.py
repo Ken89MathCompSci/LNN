@@ -1,32 +1,28 @@
 """
 Baseline Model Comparison — 80 Epochs
 ======================================
-Runs all 5 baseline NILM models on the REDD dataset:
-  - GRU       (test_redd_specific_splits.py)
-  - LSTM      (test_lstm_redd_specific_splits.py)
-  - ResNet    (test_resnet_redd_specific_splits.py)
-  - TCN       (test_tcn_redd_specific_splits.py)
-  - Transformer (test_transformer_redd_specific_splits.py)
+Runs baseline NILM models one at a time (useful when Colab times out).
 
-Training improvements over original scripts:
-  - 80 epochs (up from 20)
-  - Early stopping patience = 20 (up from 5/10)
-  - ReduceLROnPlateau scheduler (factor=0.5, patience=8)
-  - Best weight restoration
-  - Gradient clipping (max_norm=1.0)
+Run ONE model per session:
+    !python run_baseline_models_80epochs.py --model gru
+    !python run_baseline_models_80epochs.py --model lstm
+    !python run_baseline_models_80epochs.py --model resnet
+    !python run_baseline_models_80epochs.py --model tcn
+    !python run_baseline_models_80epochs.py --model transformer
 
-Outputs:
-  - results/baseline_80epochs/mae_per_appliance.png
-  - results/baseline_80epochs/sae_per_appliance.png
-  - results/baseline_80epochs/f1_per_appliance.png
-  - results/baseline_80epochs/summary_all_metrics.png
-  - results/baseline_80epochs/f1_heatmap.png
-  - results/baseline_80epochs/training_curves_<model>.png  (x5)
-  - results/baseline_80epochs/results_summary.json
+Run ALL models in one go (original behaviour):
+    !python run_baseline_models_80epochs.py --model all
+
+Generate comparison graphs from saved results (after all models done):
+    !python run_baseline_models_80epochs.py --plot
+
+Each model saves its own JSON to results/baseline_80epochs/<model>.json
+so results accumulate across separate Colab sessions.
 """
 
 import sys
 import os
+import argparse
 import torch
 import numpy as np
 import matplotlib
@@ -385,13 +381,116 @@ def print_table(all_results):
             print(row)
 
 
+# ── Shared output directory (fixed, not timestamped) ──────────────────────────
+
+SAVE_DIR = os.path.join('results', 'baseline_80epochs')
+
+
+def run_one_model(mk, splits, device):
+    """Train one model on all appliances and save its JSON + training curves."""
+    os.makedirs(SAVE_DIR, exist_ok=True)
+
+    results = {}
+    curves  = {}
+
+    print(f"\n{'#'*70}")
+    print(f"#  {MODEL_LABELS[mk]}")
+    print(f"{'#'*70}")
+
+    for app in APPLIANCES:
+        print(f"\n  ▶  {app}")
+        try:
+            m, tl, vl = train_model(mk, app, splits, device)
+            results[app] = m
+            curves[app]  = (tl, vl)
+            print(f"  ✅ {MODEL_LABELS[mk]:12s} | {app:15s} | "
+                  f"F1={m['f1']:.4f}  MAE={m['mae']:.2f}  SAE={m['sae']:.4f}")
+        except Exception as exc:
+            import traceback
+            print(f"  ❌ {MODEL_LABELS[mk]} / {app} failed: {exc}")
+            traceback.print_exc()
+
+    # Save per-model JSON
+    json_path = os.path.join(SAVE_DIR, f'{mk}.json')
+    with open(json_path, 'w') as f:
+        json.dump({'model': mk, 'label': MODEL_LABELS[mk],
+                   'epochs': EPOCHS, 'results': results}, f, indent=2)
+    print(f"\n  JSON saved → {json_path}")
+
+    # Save training curves
+    if curves:
+        training_curves(mk, curves,
+                        os.path.join(SAVE_DIR, f'training_curves_{mk}.png'))
+
+
+def load_all_results():
+    """Read all per-model JSONs from SAVE_DIR and combine into all_results dict."""
+    all_results = {}
+    for mk in MODEL_LABELS:
+        path = os.path.join(SAVE_DIR, f'{mk}.json')
+        if os.path.exists(path):
+            with open(path) as f:
+                data = json.load(f)
+            all_results[mk] = data['results']
+            print(f"  Loaded {MODEL_LABELS[mk]} from {path}")
+        else:
+            print(f"  Missing: {path}  (run --model {mk} first)")
+    return all_results
+
+
+def generate_plots(all_results):
+    """Generate all comparison graphs from combined results."""
+    os.makedirs(SAVE_DIR, exist_ok=True)
+    print("\nGenerating graphs...")
+    bar_chart(all_results, 'mae', 'MAE (W)',
+              os.path.join(SAVE_DIR, 'mae_per_appliance.png'))
+    bar_chart(all_results, 'sae', 'SAE',
+              os.path.join(SAVE_DIR, 'sae_per_appliance.png'))
+    bar_chart(all_results, 'f1',  'F1 Score',
+              os.path.join(SAVE_DIR, 'f1_per_appliance.png'))
+    summary_chart(all_results, os.path.join(SAVE_DIR, 'summary_all_metrics.png'))
+    f1_heatmap(all_results,    os.path.join(SAVE_DIR, 'f1_heatmap.png'))
+    print_table(all_results)
+
+    # Combined JSON
+    json_path = os.path.join(SAVE_DIR, 'results_summary.json')
+    with open(json_path, 'w') as f:
+        json.dump({'results': all_results}, f, indent=2)
+    print(f"\nCombined JSON → {json_path}")
+    print(f"All graphs in  → {SAVE_DIR}/")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        '--model',
+        choices=['gru', 'lstm', 'resnet', 'tcn', 'transformer', 'all'],
+        default='all',
+        help='Which model to train. Use "all" to run every model sequentially.'
+    )
+    parser.add_argument(
+        '--plot',
+        action='store_true',
+        help='Skip training — just load saved JSONs and regenerate graphs.'
+    )
+    args = parser.parse_args()
+
+    # ── Plot-only mode ──
+    if args.plot:
+        print("Plot mode — loading saved results...")
+        all_results = load_all_results()
+        if not any(all_results.values()):
+            print("No results found. Run at least one model first.")
+            sys.exit(1)
+        generate_plots(all_results)
+        return
+
+    # ── Training mode ──
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
 
-    # Check data files
     for split in ('train', 'val', 'test'):
         p = f'data/redd/{split}_small.pkl'
         if not os.path.exists(p):
@@ -400,61 +499,25 @@ def main():
 
     splits = load_data()
 
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    save_dir = os.path.join('results', f'baseline_80epochs_{timestamp}')
-    os.makedirs(save_dir, exist_ok=True)
-    print(f"Output directory: {save_dir}\n")
+    models_to_run = list(MODEL_LABELS.keys()) if args.model == 'all' else [args.model]
 
-    model_keys = list(MODEL_LABELS.keys())
+    for mk in models_to_run:
+        run_one_model(mk, splits, device)
 
-    # all_results[model_key][appliance] = metrics dict
-    all_results  = {mk: {} for mk in model_keys}
-    # all_curves[model_key][appliance] = (train_losses, val_losses)
-    all_curves   = {mk: {} for mk in model_keys}
-
-    for mk in model_keys:
-        print(f"\n{'#'*70}")
-        print(f"#  {MODEL_LABELS[mk]}")
-        print(f"{'#'*70}")
-        for app in APPLIANCES:
-            print(f"\n  ▶  {app}")
-            try:
-                metrics, tl, vl = train_model(mk, app, splits, device)
-                all_results[mk][app] = metrics
-                all_curves[mk][app]  = (tl, vl)
-                print(f"  ✅ {MODEL_LABELS[mk]:12s} | {app:15s} | "
-                      f"F1={metrics['f1']:.4f}  MAE={metrics['mae']:.2f}  SAE={metrics['sae']:.4f}")
-            except Exception as exc:
-                import traceback
-                print(f"  ❌ {MODEL_LABELS[mk]} / {app} failed: {exc}")
-                traceback.print_exc()
-
-    # ── Graphs ──
-    print("\nGenerating graphs...")
-    bar_chart(all_results, 'mae', 'MAE (W)',
-              os.path.join(save_dir, 'mae_per_appliance.png'))
-    bar_chart(all_results, 'sae', 'SAE',
-              os.path.join(save_dir, 'sae_per_appliance.png'))
-    bar_chart(all_results, 'f1',  'F1 Score',
-              os.path.join(save_dir, 'f1_per_appliance.png'))
-    summary_chart(all_results, os.path.join(save_dir, 'summary_all_metrics.png'))
-    f1_heatmap(all_results, os.path.join(save_dir, 'f1_heatmap.png'))
-
-    for mk in model_keys:
-        if all_curves[mk]:
-            training_curves(mk, all_curves[mk],
-                            os.path.join(save_dir, f'training_curves_{mk}.png'))
-
-    # ── Print tables ──
-    print_table(all_results)
-
-    # ── Save JSON ──
-    json_path = os.path.join(save_dir, 'results_summary.json')
-    with open(json_path, 'w') as f:
-        json.dump({'timestamp': timestamp, 'epochs': EPOCHS,
-                   'patience': PATIENCE, 'results': all_results}, f, indent=2)
-    print(f"\nJSON summary saved → {json_path}")
-    print(f"\nAll done.  Results in: {save_dir}")
+    # If all models done, auto-generate combined plots
+    all_done = all(
+        os.path.exists(os.path.join(SAVE_DIR, f'{mk}.json'))
+        for mk in MODEL_LABELS
+    )
+    if all_done:
+        print("\nAll models complete — generating combined graphs...")
+        all_results = load_all_results()
+        generate_plots(all_results)
+    else:
+        missing = [mk for mk in MODEL_LABELS
+                   if not os.path.exists(os.path.join(SAVE_DIR, f'{mk}.json'))]
+        print(f"\nStill missing: {missing}")
+        print("Run those models then regenerate plots with:  --plot")
 
 
 if __name__ == '__main__':
