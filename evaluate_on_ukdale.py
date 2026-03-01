@@ -2,29 +2,39 @@
 Evaluate ALL Models on UK-DALE Test Set
 =========================================
 Trains on REDD (train + val) → Evaluates on UK-DALE test pkl.
+Run one model per Colab session to avoid timeouts.
 
-Models included (11 total):
-  Baseline : GRU, LSTM, ResNet, TCN, Transformer
-  LNN      : Standard LNN, Advanced LNN, Attention LNN,
-             CNN+LNN, Transformer+LNN, Bidirectional+LNN
+Models (11 total):
+  Baseline : gru, lstm, resnet, tcn, transformer
+  LNN      : standard_lnn, advanced_lnn, attention_lnn,
+             cnn_encoder, transformer_lnn, bidirectional_lnn
 
-Requires:
-  data/redd/train_small.pkl
-  data/redd/val_small.pkl
-  data/ukdale/test_small.pkl   ← run preprocess_ukdale_to_pkl.py first
+Step 1 — prepare test file (once):
+    !python preprocess_ukdale_to_pkl.py
 
-Outputs:
-  results/ukdale_eval_<timestamp>/mae_comparison.png
-  results/ukdale_eval_<timestamp>/sae_comparison.png
-  results/ukdale_eval_<timestamp>/f1_comparison.png
-  results/ukdale_eval_<timestamp>/results_summary.json
+Step 2 — run one model per session:
+    !python evaluate_on_ukdale.py --model gru
+    !python evaluate_on_ukdale.py --model lstm
+    !python evaluate_on_ukdale.py --model resnet
+    !python evaluate_on_ukdale.py --model tcn
+    !python evaluate_on_ukdale.py --model transformer
+    !python evaluate_on_ukdale.py --model standard_lnn
+    !python evaluate_on_ukdale.py --model advanced_lnn
+    !python evaluate_on_ukdale.py --model attention_lnn
+    !python evaluate_on_ukdale.py --model cnn_encoder
+    !python evaluate_on_ukdale.py --model transformer_lnn
+    !python evaluate_on_ukdale.py --model bidirectional_lnn
 
-Usage:
-    py evaluate_on_ukdale.py
+Step 3 — generate graphs after all models done:
+    !python evaluate_on_ukdale.py --plot
+
+Run all at once (if session allows):
+    !python evaluate_on_ukdale.py --model all
 """
 
 import sys
 import os
+import argparse
 import torch
 import numpy as np
 import matplotlib
@@ -360,9 +370,120 @@ def print_table(results, apps):
             print(f"  {lbl:<22}" + ''.join(f"{v:<{col_w}.4f}" for v in vals) + f"{avg:.4f}")
 
 
+# ── Shared output directory ───────────────────────────────────────────────────
+
+SAVE_DIR = os.path.join('results', 'ukdale_eval')
+
+
+def _get_apps(redd_train, ukdale_test):
+    ukdale_cols = set(ukdale_test.columns) - {'main'}
+    redd_cols   = set(redd_train.columns)  - {'main'}
+    common      = sorted(ukdale_cols & redd_cols)
+    skipped     = sorted(ukdale_cols - redd_cols)
+    print(f"REDD appliances            : {sorted(redd_cols)}")
+    print(f"UK-DALE appliances         : {sorted(ukdale_cols)}")
+    print(f"Testing on (intersection)  : {common}")
+    if skipped:
+        print(f"Skipped (no REDD training) : {skipped}")
+    apps = [a for a in APPLIANCES if a in ukdale_cols and a in redd_cols] or common
+    return apps
+
+
+def run_one_model(mk, redd_train, redd_val, ukdale_test, apps, device):
+    """Train one model on all appliances and save its JSON."""
+    os.makedirs(SAVE_DIR, exist_ok=True)
+    label, _, group = MODEL_REGISTRY[mk]
+
+    print(f"\n{'#'*65}")
+    print(f"#  {label}  [{group}]  (train: REDD → test: UK-DALE)")
+    print(f"{'#'*65}")
+
+    results = {}
+    for app in apps:
+        print(f"\n  ▶  {app}")
+        try:
+            if group == 'baseline':
+                m = run_baseline(mk, app, redd_train, redd_val, ukdale_test, device)
+            else:
+                m = run_lnn(mk, app, redd_train, redd_val, ukdale_test, device)
+            results[app] = m
+            print(f"  ✅ {label:<22} | {app:<15} | "
+                  f"F1={m['f1']:.4f}  MAE={m['mae']:.2f}  SAE={m['sae']:.4f}")
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            print(f"  ❌ {label} / {app}: {e}")
+
+    json_path = os.path.join(SAVE_DIR, f'{mk}.json')
+    with open(json_path, 'w') as f:
+        json.dump({'model': mk, 'label': label, 'group': group,
+                   'epochs': EPOCHS, 'appliances': apps, 'results': results}, f, indent=2)
+    print(f"\n  JSON saved → {json_path}")
+
+
+def load_all_results():
+    all_results = {}
+    apps = []
+    for mk in MODEL_REGISTRY:
+        path = os.path.join(SAVE_DIR, f'{mk}.json')
+        if os.path.exists(path):
+            with open(path) as f:
+                data = json.load(f)
+            all_results[mk] = data['results']
+            if not apps:
+                apps = data.get('appliances', [])
+            print(f"  Loaded {MODEL_REGISTRY[mk][0]} from {path}")
+        else:
+            print(f"  Missing: {path}  (run --model {mk} first)")
+    return all_results, apps
+
+
+def generate_plots(all_results, apps):
+    os.makedirs(SAVE_DIR, exist_ok=True)
+    print("\nGenerating graphs...")
+    for metric, ylabel in [('mae','MAE (W)'), ('sae','SAE'), ('f1','F1 Score')]:
+        bar_chart(all_results, metric, ylabel,
+                  f'{ylabel} — Trained REDD / Tested UK-DALE',
+                  os.path.join(SAVE_DIR, f'{metric}_comparison.png'), apps)
+    print_table(all_results, apps)
+
+    json_path = os.path.join(SAVE_DIR, 'results_summary.json')
+    with open(json_path, 'w') as f:
+        json.dump({'train': 'REDD', 'test': 'UK-DALE',
+                   'appliances': apps, 'results': all_results}, f, indent=2)
+    print(f"\nCombined JSON → {json_path}")
+    print(f"All graphs in  → {SAVE_DIR}/")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    all_model_keys = list(MODEL_REGISTRY.keys())
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        '--model',
+        choices=all_model_keys + ['all'],
+        default='all',
+        help='Which model to train and evaluate.'
+    )
+    parser.add_argument(
+        '--plot',
+        action='store_true',
+        help='Skip training — load saved JSONs and regenerate graphs.'
+    )
+    args = parser.parse_args()
+
+    # ── Plot-only mode ──
+    if args.plot:
+        print("Plot mode — loading saved results...")
+        all_results, apps = load_all_results()
+        if not any(all_results.values()):
+            print("No results found. Run at least one model first.")
+            sys.exit(1)
+        generate_plots(all_results, apps)
+        return
+
+    # ── Check files ──
     for path in (REDD_TRAIN_PKL, REDD_VAL_PKL, UKDALE_TEST_PKL):
         if not os.path.exists(path):
             print(f"ERROR: {path} not found.")
@@ -371,70 +492,37 @@ def main():
             sys.exit(1)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Device : {device}")
-    print(f"Models : {len(MODEL_REGISTRY)}  (5 baseline + 6 LNN)")
+    print(f"Device: {device}")
 
     print("\nLoading data...")
     redd_train  = load_pkl(REDD_TRAIN_PKL)
     redd_val    = load_pkl(REDD_VAL_PKL)
     ukdale_test = load_pkl(UKDALE_TEST_PKL)
 
-    # Auto-detect common appliances
-    ukdale_cols = set(ukdale_test.columns) - {'main'}
-    redd_cols   = set(redd_train.columns)  - {'main'}
-    common      = sorted(ukdale_cols & redd_cols)
-    skipped     = sorted(ukdale_cols - redd_cols)
-
-    print(f"\nREDD appliances       : {sorted(redd_cols)}")
-    print(f"UK-DALE appliances    : {sorted(ukdale_cols)}")
-    print(f"Will test on          : {common}")
-    if skipped:
-        print(f"Skipped (no REDD train data): {skipped}")
-
-    apps = [a for a in APPLIANCES if a in ukdale_cols and a in redd_cols] or common
+    apps = _get_apps(redd_train, ukdale_test)
     if not apps:
         print("ERROR: No common appliances found.")
         sys.exit(1)
 
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    save_dir  = os.path.join('results', f'ukdale_eval_{timestamp}')
-    os.makedirs(save_dir, exist_ok=True)
-    print(f"\nOutput → {save_dir}\n")
+    models_to_run = all_model_keys if args.model == 'all' else [args.model]
 
-    results = {mk: {} for mk in MODEL_REGISTRY}
+    for mk in models_to_run:
+        run_one_model(mk, redd_train, redd_val, ukdale_test, apps, device)
 
-    for mk, (label, _, group) in MODEL_REGISTRY.items():
-        print(f"\n{'#'*65}")
-        print(f"#  {label}  [{group}]  (train: REDD → test: UK-DALE)")
-        print(f"{'#'*65}")
-        for app in apps:
-            print(f"\n  ▶  {app}")
-            try:
-                if group == 'baseline':
-                    m = run_baseline(mk, app, redd_train, redd_val, ukdale_test, device)
-                else:
-                    m = run_lnn(mk, app, redd_train, redd_val, ukdale_test, device)
-                results[mk][app] = m
-                print(f"  ✅ {label:<22} | {app:<15} | "
-                      f"F1={m['f1']:.4f}  MAE={m['mae']:.2f}  SAE={m['sae']:.4f}")
-            except Exception as e:
-                import traceback; traceback.print_exc()
-                print(f"  ❌ {label} / {app}: {e}")
-
-    print("\nGenerating graphs...")
-    for metric, ylabel in [('mae','MAE (W)'), ('sae','SAE'), ('f1','F1 Score')]:
-        bar_chart(results, metric, ylabel,
-                  f'{ylabel} — Trained REDD / Tested UK-DALE',
-                  os.path.join(save_dir, f'{metric}_comparison.png'), apps)
-
-    print_table(results, apps)
-
-    json_path = os.path.join(save_dir, 'results_summary.json')
-    with open(json_path, 'w') as f:
-        json.dump({'timestamp': timestamp, 'train': 'REDD', 'test': 'UK-DALE',
-                   'epochs': EPOCHS, 'appliances': apps, 'results': results}, f, indent=2)
-    print(f"\nJSON → {json_path}")
-    print(f"Done.  Results in: {save_dir}")
+    # Auto-generate plots if all models done
+    all_done = all(
+        os.path.exists(os.path.join(SAVE_DIR, f'{mk}.json'))
+        for mk in all_model_keys
+    )
+    if all_done:
+        print("\nAll models complete — generating combined graphs...")
+        all_results, apps = load_all_results()
+        generate_plots(all_results, apps)
+    else:
+        missing = [mk for mk in all_model_keys
+                   if not os.path.exists(os.path.join(SAVE_DIR, f'{mk}.json'))]
+        print(f"\nStill missing: {missing}")
+        print("Run those models then:  !python evaluate_on_ukdale.py --plot")
 
 
 if __name__ == '__main__':
