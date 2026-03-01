@@ -1030,3 +1030,87 @@ class BidirectionalEncoderLiquidNetworkModel(nn.Module):
         output = self.fc(h_combined)  # (batch_size, output_size)
 
         return output
+
+
+class HybridTransformerLNNModel(nn.Module):
+    """
+    Hybrid Transformer + LNN model for NILM.
+
+    Inspired by:
+      Gabriel et al. (2025) "Hybrid transformer model with liquid neural networks
+      and learnable encodings for buildings' energy forecasting", Energy and AI.
+      DOI: 10.1016/j.egyai.2025.100489
+
+    Architecture:
+      1. Learnable encoding  — 2-layer MLP with LayerNorm (non-linear input embedding)
+      2. CNN encoder         — local feature extraction over the time axis
+      3. Transformer encoder — global self-attention over the CNN features
+      4. LNN reservoir       — LiquidODECell processes the contextualised sequence
+      5. FC output           — maps final LNN hidden state to prediction
+    """
+
+    def __init__(self, input_size, hidden_size, output_size, dt=0.1,
+                 num_conv_layers=2, num_encoder_layers=2, num_heads=4, dropout=0.1):
+        super().__init__()
+        self.hidden_size = hidden_size
+
+        # 1. Learnable encodings
+        self.learnable_encoding = nn.Sequential(
+            nn.Linear(input_size, hidden_size),
+            nn.LayerNorm(hidden_size),
+            nn.GELU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.LayerNorm(hidden_size),
+        )
+
+        # 2. CNN encoder (operates on time axis)
+        cnn_layers = []
+        for _ in range(num_conv_layers):
+            cnn_layers.append(nn.Sequential(
+                nn.Conv1d(hidden_size, hidden_size, kernel_size=3, padding=1),
+                nn.BatchNorm1d(hidden_size),
+                nn.GELU(),
+                nn.Dropout(dropout),
+            ))
+        self.cnn_encoder = nn.ModuleList(cnn_layers)
+
+        # 3. Transformer encoder
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_size,
+            nhead=num_heads,
+            dim_feedforward=hidden_size * 4,
+            dropout=dropout,
+            batch_first=True,
+            activation='gelu',
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer, num_layers=num_encoder_layers)
+
+        # 4. LNN reservoir
+        self.liquid = LiquidODECell(hidden_size, hidden_size, dt=dt)
+
+        # 5. Output
+        self.fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        batch_size, seq_len, _ = x.size()
+
+        # 1. Learnable encodings (applied pointwise across time)
+        x = self.learnable_encoding(x)          # (B, seq_len, H)
+
+        # 2. CNN encoder
+        x = x.transpose(1, 2)                   # (B, H, seq_len)
+        for layer in self.cnn_encoder:
+            x = layer(x)
+        x = x.transpose(1, 2)                   # (B, seq_len, H)
+
+        # 3. Transformer encoder
+        x = self.transformer_encoder(x)          # (B, seq_len, H)
+
+        # 4. LNN reservoir
+        h = torch.zeros(batch_size, self.hidden_size, device=x.device)
+        for t in range(seq_len):
+            h = self.liquid(x[:, t, :], h)
+
+        # 5. Output
+        return self.fc(h)
