@@ -38,7 +38,6 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from datetime import datetime
-from tqdm import tqdm
 
 sys.path.append('Source Code')
 
@@ -161,11 +160,14 @@ def train_appliance(appliance_name, splits, device, epochs, hidden_size):
     y_te_n = (y_te - y_mean) / y_std
 
     tr_loader = torch.utils.data.DataLoader(
-        SimpleDataset(X_tr, y_tr_n.reshape(-1, 1)), batch_size=BATCH, shuffle=True)
+        SimpleDataset(X_tr, y_tr_n.reshape(-1, 1)), batch_size=BATCH,
+        shuffle=True,  pin_memory=True, num_workers=2)
     va_loader = torch.utils.data.DataLoader(
-        SimpleDataset(X_va, y_va_n.reshape(-1, 1)), batch_size=BATCH, shuffle=False)
+        SimpleDataset(X_va, y_va_n.reshape(-1, 1)), batch_size=BATCH,
+        shuffle=False, pin_memory=True, num_workers=2)
     te_loader = torch.utils.data.DataLoader(
-        SimpleDataset(X_te, y_te_n.reshape(-1, 1)), batch_size=BATCH, shuffle=False)
+        SimpleDataset(X_te, y_te_n.reshape(-1, 1)), batch_size=BATCH,
+        shuffle=False, pin_memory=True, num_workers=2)
 
     model = HybridTransformerLNNModel(
         input_size=1, hidden_size=hidden_size, output_size=1,
@@ -187,10 +189,8 @@ def train_appliance(appliance_name, splits, device, epochs, hidden_size):
         # ── Train ──
         model.train()
         ep_loss = 0.0
-        for xb, yb in tqdm(tr_loader,
-                            desc=f"  [{appliance_name}] Epoch {epoch+1}/{epochs}",
-                            leave=False):
-            xb, yb = xb.to(device), yb.to(device)
+        for xb, yb in tr_loader:
+            xb, yb = xb.to(device, non_blocking=True), yb.to(device, non_blocking=True)
             optimizer.zero_grad()
             out  = model(xb)
             loss = criterion(out, yb)
