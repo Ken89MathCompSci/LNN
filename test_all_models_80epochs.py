@@ -177,6 +177,31 @@ def build_model(model_type, hidden_size=256, dt=0.1):
         raise ValueError(f"Unknown model_type: {model_type}")
 
 
+# ── Fast per-epoch metrics (no sklearn, vectorised SAE) ───────────────────────
+
+def _fast_epoch_metrics(y_true, y_pred, threshold):
+    y_true = y_true.flatten()
+    y_pred = y_pred.flatten()
+    mae = float(np.mean(np.abs(y_true - y_pred)))
+    N = 100
+    num_periods = len(y_true) // N
+    if num_periods > 0:
+        t_b = y_true[:num_periods * N].reshape(num_periods, N)
+        p_b = y_pred[:num_periods * N].reshape(num_periods, N)
+        sae = float(np.abs(t_b.sum(1) - p_b.sum(1)).sum() / (N * num_periods))
+    else:
+        sae = 0.0
+    t_bin = y_true > threshold
+    p_bin = y_pred > threshold
+    tp = int(np.sum(t_bin & p_bin))
+    fp = int(np.sum(~t_bin & p_bin))
+    fn = int(np.sum(t_bin & ~p_bin))
+    pr = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    rc = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = 2 * pr * rc / (pr + rc) if (pr + rc) > 0 else 0.0
+    return {'mae': mae, 'sae': sae, 'f1': f1}
+
+
 # ── Training ──────────────────────────────────────────────────────────────────
 
 def train_and_evaluate(
@@ -268,7 +293,7 @@ def train_and_evaluate(
         # Epoch-wise metrics (denormalized)
         ep_pred = np.concatenate(val_preds_ep) * y_std + y_mean
         ep_true = np.concatenate(val_trues_ep) * y_std + y_mean
-        ep_m = calculate_nilm_metrics(ep_true, ep_pred, threshold=THRESHOLDS[appliance_name])
+        ep_m = _fast_epoch_metrics(ep_true, ep_pred, threshold=THRESHOLDS[appliance_name])
         val_mae_hist.append(ep_m['mae'])
         val_sae_hist.append(ep_m['sae'])
         val_f1_hist.append(ep_m['f1'])

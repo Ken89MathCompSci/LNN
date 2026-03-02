@@ -1,14 +1,22 @@
 """
-Hybrid Transformer-LNN — 80 Epochs
+CNN + TCN + LNN Hybrid — 80 Epochs
 ====================================
-Trains and evaluates HybridTransformerLNNModel on all REDD appliances.
+Trains and evaluates TCNLNNModel on all REDD appliances.
 
-Architecture (Gabriel et al., 2025 — Energy and AI, DOI: 10.1016/j.egyai.2025.100489):
-  Learnable Encoding → CNN Encoder → Transformer Encoder → LNN Reservoir → FC Output
+Architecture:
+  CNN encoder (local features)
+    → TCN blocks with dilated residual convolutions (multi-scale temporal)
+    → LiquidODECell reservoir (continuous-time dynamics)
+    → FC output
+
+Each stage adds a distinct inductive bias:
+  CNN  — short-window local patterns
+  TCN  — exponentially growing receptive field via dilation (2^0, 2^1, ..., 2^(N-1))
+  LNN  — learnable time-constant integration of the TCN features
 
 Usage:
-    !python test_hybrid_transformer_lnn.py
-    !python test_hybrid_transformer_lnn.py --epochs 80 --hidden 256
+    !python test_tcn_lnn.py
+    !python test_tcn_lnn.py --epochs 80 --hidden 256
 """
 
 import sys
@@ -21,13 +29,104 @@ import torch
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from datetime import datetime
 from tqdm import tqdm
 
 sys.path.append('Source Code')
 
-from models import HybridTransformerLNNModel
 from utils import calculate_nilm_metrics
+
+import torch.nn as nn
+
+
+# ── Model (self-contained, not imported from models.py) ───────────────────────
+
+class LiquidODECell(nn.Module):
+    """Liquid time-constant RNN cell with Euler ODE integration."""
+
+    def __init__(self, input_size, hidden_size, dt=0.1):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.dt = dt
+        self.input_proj  = nn.Linear(input_size, hidden_size)
+        self.tau         = nn.Parameter(torch.ones(hidden_size))
+        self.rec_weights = nn.Parameter(torch.empty(hidden_size, hidden_size))
+        nn.init.xavier_uniform_(self.rec_weights)
+        self.tanh = nn.Tanh()
+
+    def forward(self, x, hidden):
+        f_t = self.tanh(self.input_proj(x) + torch.matmul(hidden, self.rec_weights))
+        dh  = (-hidden / self.tau.unsqueeze(0) + f_t) * self.dt
+        return hidden + dh
+
+
+class TCNLNNModel(nn.Module):
+    """
+    CNN + TCN + LNN hybrid model for NILM.
+
+    Architecture:
+      1. CNN encoder   — Conv1d layers for local feature extraction
+      2. TCN blocks    — dilated Conv1d with residual connections (dilation 2^i)
+      3. LNN reservoir — LiquidODECell for continuous-time dynamics
+      4. FC output
+    """
+
+    def __init__(self, input_size, hidden_size, output_size, dt=0.1,
+                 num_cnn_layers=2, num_tcn_layers=4, kernel_size=3, dropout=0.1):
+        super().__init__()
+        self.hidden_size = hidden_size
+
+        # 1. CNN encoder
+        cnn, in_ch = [], input_size
+        for _ in range(num_cnn_layers):
+            cnn.append(nn.Sequential(
+                nn.Conv1d(in_ch, hidden_size, kernel_size, padding=kernel_size // 2),
+                nn.BatchNorm1d(hidden_size),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+            ))
+            in_ch = hidden_size
+        self.cnn_encoder = nn.Sequential(*cnn)
+
+        # 2. TCN blocks with exponentially increasing dilation
+        tcn = []
+        for i in range(num_tcn_layers):
+            dilation = 2 ** i
+            pad = (kernel_size - 1) * dilation // 2
+            tcn.append(nn.ModuleList([
+                nn.Conv1d(hidden_size, hidden_size, kernel_size,
+                          padding=pad, dilation=dilation),
+                nn.BatchNorm1d(hidden_size),
+                nn.Dropout(dropout),
+            ]))
+        self.tcn_blocks = nn.ModuleList(tcn)
+        self.relu = nn.ReLU()
+
+        # 3. LNN reservoir
+        self.liquid = LiquidODECell(hidden_size, hidden_size, dt=dt)
+
+        # 4. Output
+        self.fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        batch_size, seq_len, _ = x.size()
+
+        # CNN encoder: (B, L, C) → (B, C, L) → (B, H, L)
+        x = x.transpose(1, 2)
+        x = self.cnn_encoder(x)
+
+        # TCN blocks with residual connections
+        for block in self.tcn_blocks:
+            conv, bn, drop = block
+            x = drop(self.relu(bn(conv(x)))) + x
+
+        x = x.transpose(1, 2)          # (B, L, H)
+
+        # LNN reservoir
+        h = torch.zeros(batch_size, self.hidden_size, device=x.device)
+        for t in range(seq_len):
+            h = self.liquid(x[:, t, :], h)
+
+        return self.fc(h)
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -47,8 +146,8 @@ THRESHOLDS = {
     'washer dryer':  0.5,
 }
 
-SAVE_DIR = os.path.join('results', 'hybrid_transformer_lnn')
-COLOR    = '#17BECF'
+SAVE_DIR = os.path.join('results', 'tcn_lnn')
+COLOR    = '#2CA02C'
 
 # ── Data ───────────────────────────────────────────────────────────────────────
 
@@ -121,7 +220,6 @@ def train_appliance(appliance_name, splits, device, epochs, hidden_size):
     X_te, y_te = create_sequences(splits['test']['main'].values,
                                    splits['test'][appliance_name].values)
 
-    # Normalise using training stats
     x_mean, x_std = float(X_tr.mean()), float(X_tr.std()) + 1e-8
     y_mean, y_std = float(y_tr.mean()), float(y_tr.std()) + 1e-8
 
@@ -139,9 +237,9 @@ def train_appliance(appliance_name, splits, device, epochs, hidden_size):
     te_loader = torch.utils.data.DataLoader(
         SimpleDataset(X_te, y_te_n.reshape(-1, 1)), batch_size=BATCH, shuffle=False)
 
-    model = HybridTransformerLNNModel(
+    model = TCNLNNModel(
         input_size=1, hidden_size=hidden_size, output_size=1,
-        dt=0.1, num_conv_layers=2, num_encoder_layers=2, num_heads=4,
+        dt=0.1, num_cnn_layers=2, num_tcn_layers=4, kernel_size=3,
     ).to(device)
 
     criterion = torch.nn.MSELoss()
@@ -187,7 +285,6 @@ def train_appliance(appliance_name, splits, device, epochs, hidden_size):
         val_losses.append(avg_va)
         scheduler.step(avg_va)
 
-        # Epoch-wise metrics (denormalized)
         ep_pred = np.concatenate(val_preds_ep) * y_std + y_mean
         ep_true = np.concatenate(val_trues_ep) * y_std + y_mean
         ep_m = _fast_epoch_metrics(ep_true, ep_pred, threshold=thr)
@@ -209,7 +306,6 @@ def train_appliance(appliance_name, splits, device, epochs, hidden_size):
                 print(f"  Early stopping at epoch {epoch+1}")
                 break
 
-    # ── Test ──
     if best_state is not None:
         model.load_state_dict(best_state)
     model.eval()
@@ -241,7 +337,7 @@ def plot_training_curves(results, save_dir):
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
     axes = axes.flatten()
     for ax, app in zip(axes, APPLIANCES):
-        r = results[app]
+        r  = results[app]
         ep = range(1, r['epochs_run'] + 1)
         ax.plot(ep, r['train_losses'], label='Train', color='steelblue', lw=1.5)
         ax.plot(ep, r['val_losses'],   label='Val',   color='tomato',    lw=1.5, linestyle='--')
@@ -250,7 +346,7 @@ def plot_training_curves(results, save_dir):
         ax.set_ylabel('MSE Loss')
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
-    fig.suptitle('Training Curves — Hybrid Transformer-LNN (80 epochs)', fontsize=12)
+    fig.suptitle('Training Curves — CNN + TCN + LNN (80 epochs)', fontsize=12)
     plt.tight_layout()
     path = os.path.join(save_dir, 'training_curves.png')
     plt.savefig(path, dpi=150, bbox_inches='tight')
@@ -259,16 +355,12 @@ def plot_training_curves(results, save_dir):
 
 
 def plot_epoch_metrics(results, save_dir):
-    metric_info = [
-        ('val_mae_hist', 'MAE (W)'),
-        ('val_sae_hist', 'SAE'),
-        ('val_f1_hist',  'F1'),
-    ]
+    metric_info = [('val_mae_hist', 'MAE (W)'), ('val_sae_hist', 'SAE'), ('val_f1_hist', 'F1')]
     fig, axes = plt.subplots(len(APPLIANCES), 3, figsize=(15, 4 * len(APPLIANCES)))
     for row, app in enumerate(APPLIANCES):
         r = results[app]
         for col, (hist_key, mk_label) in enumerate(metric_info):
-            ax = axes[row, col]
+            ax   = axes[row, col]
             vals = r.get(hist_key, [])
             if vals:
                 ax.plot(range(1, len(vals) + 1), vals, color=COLOR, lw=1.5)
@@ -276,7 +368,7 @@ def plot_epoch_metrics(results, save_dir):
             ax.set_xlabel('Epoch')
             ax.set_ylabel(mk_label)
             ax.grid(True, alpha=0.3)
-    fig.suptitle('Val Metrics per Epoch — Hybrid Transformer-LNN (80 epochs)', fontsize=12)
+    fig.suptitle('Val Metrics per Epoch — CNN + TCN + LNN (80 epochs)', fontsize=12)
     plt.tight_layout()
     path = os.path.join(save_dir, 'epoch_metrics.png')
     plt.savefig(path, dpi=150, bbox_inches='tight')
@@ -302,7 +394,7 @@ def plot_bar_chart(results, save_dir):
         ax.set_title(f'{ml} per Appliance')
         ax.grid(axis='y', alpha=0.3)
         ax.set_axisbelow(True)
-    fig.suptitle('Final Metrics — Hybrid Transformer-LNN (80 epochs)', fontsize=12)
+    fig.suptitle('Final Metrics — CNN + TCN + LNN (80 epochs)', fontsize=12)
     plt.tight_layout()
     path = os.path.join(save_dir, 'bar_chart.png')
     plt.savefig(path, dpi=150, bbox_inches='tight')
@@ -316,14 +408,13 @@ def print_table(results):
     divider = '─' * 75
     for metric, label in [('f1', 'F1'), ('mae', 'MAE'), ('sae', 'SAE')]:
         print(f"\n{'='*75}")
-        print(f"  {label} — Hybrid Transformer-LNN")
+        print(f"  {label} — CNN + TCN + LNN")
         print(f"{'='*75}")
-        header = f"  {'Appliance':<20}" + f"{'Value':>12}" + f"  (epochs run)"
-        print(header)
+        print(f"  {'Appliance':<20}{'Value':>12}  (epochs run)")
         print(divider)
         vals = []
         for app in APPLIANCES:
-            v = results[app]['metrics'].get(metric, float('nan'))
+            v  = results[app]['metrics'].get(metric, float('nan'))
             ep = results[app]['epochs_run']
             print(f"  {app.title():<20}{v:>12.4f}  ({ep} epochs)")
             vals.append(v)
@@ -334,12 +425,9 @@ def print_table(results):
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(
-        description='Hybrid Transformer-LNN — 80 Epochs')
-    parser.add_argument('--epochs', type=int, default=EPOCHS,
-                        help=f'Max training epochs (default: {EPOCHS})')
-    parser.add_argument('--hidden', type=int, default=256,
-                        help='Hidden size (default: 256)')
+    parser = argparse.ArgumentParser(description='CNN + TCN + LNN — 80 Epochs')
+    parser.add_argument('--epochs', type=int, default=EPOCHS)
+    parser.add_argument('--hidden', type=int, default=256)
     args = parser.parse_args()
 
     for fp in ['data/redd/train_small.pkl',
@@ -352,13 +440,14 @@ def main():
     os.makedirs(SAVE_DIR, exist_ok=True)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Device: {device}')
-    print(f'Hidden size: {args.hidden}  |  Max epochs: {args.epochs}')
+    print(f'Hidden: {args.hidden}  |  Max epochs: {args.epochs}')
+    print('Architecture: CNN encoder → TCN dilated residual blocks → LiquidODECell → FC')
 
-    splits = load_data()
+    splits  = load_data()
     results = {}
 
     print('\n' + '=' * 70)
-    print('  Hybrid Transformer-LNN — Training')
+    print('  CNN + TCN + LNN — Training')
     print('=' * 70)
 
     for app in APPLIANCES:
@@ -369,20 +458,17 @@ def main():
         print(f"  ✅ {app:15s} | F1={m['f1']:.4f}  MAE={m['mae']:.2f}  "
               f"SAE={m['sae']:.4f}  (params={r['num_params']:,})")
 
-    # ── Plots ──
     print('\nGenerating plots...')
     plot_training_curves(results, SAVE_DIR)
     plot_epoch_metrics(results, SAVE_DIR)
     plot_bar_chart(results, SAVE_DIR)
 
-    # ── Console table ──
     print_table(results)
 
-    # ── Save JSON ──
     json_path = os.path.join(SAVE_DIR, 'results.json')
     with open(json_path, 'w') as f:
         json.dump({
-            'model': 'HybridTransformerLNN',
+            'model': 'TCNLNNModel',
             'hidden_size': args.hidden,
             'epochs': args.epochs,
             'results': {
