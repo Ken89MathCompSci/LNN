@@ -1114,3 +1114,197 @@ class HybridTransformerLNNModel(nn.Module):
 
         # 5. Output
         return self.fc(h)
+
+
+# ── Hybrid Transformer-LNN v2 (paper-faithful) helper classes ─────────────────
+
+class LiquidReservoir(nn.Module):
+    """
+    Spectral-radius controlled reservoir layer (Gabriel et al., 2025).
+    Processes Q or K in attention with controlled non-linearity:
+        output = tanh(x @ W_reservoir)
+    W is initialised so its spectral radius equals `spectral_radius`.
+    """
+    def __init__(self, size, spectral_radius=0.9):
+        super().__init__()
+        W = torch.randn(size, size)
+        max_eig = torch.linalg.eigvals(W).abs().max()
+        W = W / max_eig * spectral_radius
+        self.W = nn.Parameter(W)
+
+    def forward(self, x):
+        return torch.tanh(x @ self.W)
+
+
+class AdaptivePositionalEncoding(nn.Module):
+    """
+    Adaptive positional encoding (Gabriel et al., 2025):
+        PE_adaptive = alpha * PE_sinusoidal + beta
+    where alpha and beta are learnable scalars.
+    """
+    def __init__(self, hidden_size, max_len=512):
+        super().__init__()
+        self.alpha = nn.Parameter(torch.ones(1))
+        self.beta  = nn.Parameter(torch.zeros(1))
+
+        pe = torch.zeros(max_len, hidden_size)
+        pos = torch.arange(0, max_len).unsqueeze(1).float()
+        div = torch.exp(
+            torch.arange(0, hidden_size, 2).float() *
+            -(math.log(10000.0) / hidden_size)
+        )
+        pe[:, 0::2] = torch.sin(pos * div)
+        pe[:, 1::2] = torch.cos(pos * div)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        seq_len = x.size(1)
+        return x + self.alpha * self.pe[:seq_len] + self.beta
+
+
+class LiquidTransformerLayer(nn.Module):
+    """
+    Transformer encoder layer with two paper-faithful innovations
+    (Gabriel et al., 2025):
+      - LNN reservoir applied to Q and K before scaled dot-product attention
+      - GLU feedforward network (instead of standard ReLU/GELU FFN)
+    """
+    def __init__(self, hidden_size, num_heads, dropout=0.1, spectral_radius=0.9):
+        super().__init__()
+        assert hidden_size % num_heads == 0, "hidden_size must be divisible by num_heads"
+        self.num_heads = num_heads
+        self.head_dim  = hidden_size // num_heads
+        self.scale     = self.head_dim ** -0.5
+
+        # Attention projections
+        self.q_proj   = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.k_proj   = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.v_proj   = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.out_proj = nn.Linear(hidden_size, hidden_size)
+
+        # LNN reservoirs for Q and K
+        self.liquid_q = LiquidReservoir(hidden_size, spectral_radius)
+        self.liquid_k = LiquidReservoir(hidden_size, spectral_radius)
+
+        # GLU feedforward: H → 4H → GLU → 2H → H
+        self.ff_gate = nn.Linear(hidden_size, hidden_size * 4)
+        self.ff_out  = nn.Linear(hidden_size * 2, hidden_size)
+
+        self.norm1   = nn.LayerNorm(hidden_size)
+        self.norm2   = nn.LayerNorm(hidden_size)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        B, L, H = x.size()
+
+        # ── LNN-enhanced multi-head self-attention ──
+        residual = x
+        x = self.norm1(x)
+
+        Q = self.liquid_q(self.q_proj(x))   # (B, L, H) — tanh(QW_res)
+        K = self.liquid_k(self.k_proj(x))   # (B, L, H) — tanh(KW_res)
+        V = self.v_proj(x)                  # (B, L, H)
+
+        def split_heads(t):
+            return t.view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
+        Q, K, V = split_heads(Q), split_heads(K), split_heads(V)
+
+        scores  = (Q @ K.transpose(-2, -1)) * self.scale
+        weights = torch.softmax(scores, dim=-1)
+        weights = self.dropout(weights)
+        attn    = (weights @ V).transpose(1, 2).reshape(B, L, H)
+        x = residual + self.dropout(self.out_proj(attn))
+
+        # ── GLU feedforward ──
+        residual = x
+        x = self.norm2(x)
+        gate = self.ff_gate(x)                   # (B, L, 4H)
+        a, b = gate.chunk(2, dim=-1)             # each (B, L, 2H)
+        x = residual + self.dropout(self.ff_out(a * torch.sigmoid(b)))
+
+        return x
+
+
+class HybridTransformerLNNv2Model(nn.Module):
+    """
+    Hybrid Transformer + LNN v2 — paper-faithful implementation.
+
+    Gabriel et al. (2025) "Hybrid transformer model with liquid neural networks
+    and learnable encodings for buildings' energy forecasting", Energy and AI.
+    DOI: 10.1016/j.egyai.2025.100489
+
+    Key differences from HybridTransformerLNNModel (v1):
+      - LNN reservoir is embedded INSIDE attention (modifies Q and K),
+        not applied sequentially after the Transformer
+      - Adaptive positional encoding: PE = α·PE_sinusoidal + β (learnable α, β)
+      - CNN encoder uses ReLU + MaxPool1d (per paper) instead of GELU
+      - GLU feedforward in each Transformer layer instead of standard FFN
+      - Final prediction uses last-token output (no LiquidODECell at end)
+
+    Architecture:
+      1. Input embedding    — 2-layer MLP with LayerNorm
+      2. CNN encoder        — Conv1d + BN + ReLU + MaxPool1d
+      3. Adaptive PE        — sinusoidal PE scaled by learnable α, β
+      4. LiquidTransformer  — self-attention with LNN reservoirs on Q,K + GLU FFN
+      5. FC output          — last-token representation → prediction
+    """
+
+    def __init__(self, input_size, hidden_size, output_size, dt=0.1,
+                 num_conv_layers=2, num_encoder_layers=2, num_heads=4,
+                 dropout=0.1, spectral_radius=0.9):
+        super().__init__()
+        self.hidden_size = hidden_size
+
+        # 1. Input embedding (dense learnable encodings)
+        self.input_embedding = nn.Sequential(
+            nn.Linear(input_size, hidden_size),
+            nn.LayerNorm(hidden_size),
+            nn.GELU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.LayerNorm(hidden_size),
+        )
+
+        # 2. CNN encoder with MaxPool (preserves sequence length)
+        cnn_layers = []
+        for _ in range(num_conv_layers):
+            cnn_layers.append(nn.Sequential(
+                nn.Conv1d(hidden_size, hidden_size, kernel_size=3, padding=1),
+                nn.BatchNorm1d(hidden_size),
+                nn.ReLU(),
+                nn.MaxPool1d(kernel_size=3, stride=1, padding=1),
+                nn.Dropout(dropout),
+            ))
+        self.cnn_encoder = nn.ModuleList(cnn_layers)
+
+        # 3. Adaptive positional encoding
+        self.pos_encoding = AdaptivePositionalEncoding(hidden_size)
+
+        # 4. LNN-integrated Transformer layers
+        self.transformer_layers = nn.ModuleList([
+            LiquidTransformerLayer(hidden_size, num_heads, dropout, spectral_radius)
+            for _ in range(num_encoder_layers)
+        ])
+
+        # 5. Output (last token)
+        self.norm = nn.LayerNorm(hidden_size)
+        self.fc   = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        # 1. Input embedding
+        x = self.input_embedding(x)       # (B, seq_len, H)
+
+        # 2. CNN encoder
+        x = x.transpose(1, 2)            # (B, H, seq_len)
+        for layer in self.cnn_encoder:
+            x = layer(x)
+        x = x.transpose(1, 2)            # (B, seq_len, H)
+
+        # 3. Adaptive positional encoding
+        x = self.pos_encoding(x)
+
+        # 4. LNN-integrated Transformer
+        for layer in self.transformer_layers:
+            x = layer(x)
+
+        # 5. Last token → prediction
+        return self.fc(self.norm(x[:, -1, :]))
