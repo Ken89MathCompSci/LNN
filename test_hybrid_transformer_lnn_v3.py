@@ -28,6 +28,7 @@ Usage:
 
 import sys
 import os
+import time
 import argparse
 import json
 import pickle
@@ -382,6 +383,7 @@ def _save_appliance_json(app, r, hidden, epochs):
             'val_mae_hist': r['val_mae_hist'],
             'val_sae_hist': r['val_sae_hist'],
             'val_f1_hist':  r['val_f1_hist'],
+            'time_s':       r.get('time_s', None),
         }, f, indent=2)
     print(f'  JSON saved → {path}')
 
@@ -453,14 +455,22 @@ def main():
     print('=' * 70)
 
     results = {}
+    total_start = time.time()
     for app in apps_to_run:
         print(f'\n  ▶  {app}')
+        t0 = time.time()
         r = train_appliance(app, splits, device, args.epochs, args.hidden)
+        elapsed = time.time() - t0
+        r['time_s'] = elapsed
         results[app] = r
         m = r['metrics']
         print(f"  ✅ {app:15s} | F1={m['f1']:.4f}  MAE={m['mae']:.2f}  "
-              f"SAE={m['sae']:.4f}  (params={r['num_params']:,})")
+              f"SAE={m['sae']:.4f}  (params={r['num_params']:,})  "
+              f"time={elapsed:.1f}s")
         _save_appliance_json(app, r, args.hidden, args.epochs)
+    total_elapsed = time.time() - total_start
+    print(f'\n  Total training time: {total_elapsed:.1f}s '
+          f'({total_elapsed/60:.1f} min)')
 
     # Auto-generate plots only if all appliances are done
     all_done = all(

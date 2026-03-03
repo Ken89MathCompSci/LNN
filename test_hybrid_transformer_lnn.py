@@ -13,6 +13,7 @@ Usage:
 
 import sys
 import os
+import time
 import argparse
 import json
 import pickle
@@ -361,13 +362,21 @@ def main():
     print('  Hybrid Transformer-LNN — Training')
     print('=' * 70)
 
+    total_start = time.time()
     for app in APPLIANCES:
         print(f'\n  ▶  {app}')
+        t0 = time.time()
         r = train_appliance(app, splits, device, args.epochs, args.hidden)
+        elapsed = time.time() - t0
+        r['time_s'] = elapsed
         results[app] = r
         m = r['metrics']
         print(f"  ✅ {app:15s} | F1={m['f1']:.4f}  MAE={m['mae']:.2f}  "
-              f"SAE={m['sae']:.4f}  (params={r['num_params']:,})")
+              f"SAE={m['sae']:.4f}  (params={r['num_params']:,})  "
+              f"time={elapsed:.1f}s")
+    total_elapsed = time.time() - total_start
+    print(f'\n  Total training time: {total_elapsed:.1f}s '
+          f'({total_elapsed/60:.1f} min)')
 
     # ── Plots ──
     print('\nGenerating plots...')
@@ -390,6 +399,7 @@ def main():
                     'epochs_run': r['epochs_run'],
                     'num_params': r['num_params'],
                     'metrics': {k: float(v) for k, v in r['metrics'].items()},
+                    'time_s': r.get('time_s', None),
                 }
                 for app, r in results.items()
             }
