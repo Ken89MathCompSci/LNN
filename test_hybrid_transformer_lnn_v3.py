@@ -7,7 +7,7 @@ Architecture (Gabriel et al., 2025 — Energy and AI, DOI: 10.1016/j.egyai.2025.
   Learnable Encoding → CNN Encoder → Transformer Encoder → LNN Reservoir → FC Output
 
 Improvements over baseline:
-  - AdamW optimiser with weight_decay=1e-4 (better regularisation)
+  - Adam optimiser (lr=1e-3)
   - Combined MSE + KL divergence loss (distributional alignment, from MATNilm)
   - --appliance flag: run one appliance per Colab session to avoid timeouts
   - --plot flag: regenerate graphs from saved per-appliance JSONs
@@ -49,7 +49,7 @@ from utils import calculate_nilm_metrics
 EPOCHS      = 80
 PATIENCE    = 20
 LR          = 1e-3
-WEIGHT_DECAY = 1e-4   # AdamW regularisation (from MATNilm kengoh-adamw-weight-decay)
+WEIGHT_DECAY = 0.0    # Adam (no weight decay)
 KL_WEIGHT   = 0.1    # KL loss weight; set 0.0 to disable
 BATCH       = 128
 WIN         = 100
@@ -175,7 +175,7 @@ def train_appliance(appliance_name, splits, device, epochs, hidden_size):
     ).to(device)
 
     criterion = torch.nn.MSELoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=8, min_lr=1e-5)
 
@@ -442,7 +442,7 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Device: {device}')
     print(f'Hidden size: {args.hidden}  |  Max epochs: {args.epochs}')
-    print(f'Optimiser: AdamW  weight_decay={WEIGHT_DECAY}  KL_weight={KL_WEIGHT}')
+    print(f'Optimiser: Adam  KL_weight={KL_WEIGHT}')
 
     splits = load_data()
 
@@ -481,8 +481,8 @@ def main():
                 'model': 'HybridTransformerLNN',
                 'hidden_size': args.hidden,
                 'epochs': args.epochs,
-                'optimiser': 'AdamW',
-                'weight_decay': WEIGHT_DECAY,
+                'optimiser': 'Adam',
+                'weight_decay': 0.0,
                 'kl_weight': KL_WEIGHT,
                 'results': {
                     app: {

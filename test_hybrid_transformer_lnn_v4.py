@@ -1,9 +1,8 @@
 """
 Hybrid Transformer-LNN v4 — Modest Improvement over v1
 =========================================================
-Same as test_hybrid_transformer_lnn.py with two additions:
-  1. AdamW optimiser with weight_decay=1e-4  (better regularisation, no speed cost)
-  2. --appliance / --plot flags              (run one appliance per Colab session)
+Same as test_hybrid_transformer_lnn.py with one addition:
+  1. --appliance / --plot flags  (run one appliance per Colab session)
 
 Architecture (Gabriel et al., 2025 — Energy and AI, DOI: 10.1016/j.egyai.2025.100489):
   Learnable Encoding → CNN Encoder → Transformer Encoder → LNN Reservoir → FC Output
@@ -45,7 +44,7 @@ from utils import calculate_nilm_metrics
 EPOCHS       = 80
 PATIENCE     = 20
 LR           = 1e-3
-WEIGHT_DECAY = 1e-4   # AdamW regularisation — only change vs v1
+WEIGHT_DECAY = 0.0    # Adam (no weight decay)
 BATCH        = 128
 WIN          = 100
 
@@ -156,7 +155,7 @@ def train_appliance(appliance_name, splits, device, epochs, hidden_size):
     ).to(device)
 
     criterion = torch.nn.MSELoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=8, min_lr=1e-5)
 
@@ -372,7 +371,7 @@ def _load_all_appliance_jsons():
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Hybrid Transformer-LNN v4 — AdamW + per-appliance flags')
+        description='Hybrid Transformer-LNN v4 — Adam + per-appliance flags')
     parser.add_argument('--epochs', type=int, default=EPOCHS,
                         help=f'Max training epochs (default: {EPOCHS})')
     parser.add_argument('--hidden', type=int, default=256,
@@ -410,7 +409,7 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Device: {device}')
     print(f'Hidden size: {args.hidden}  |  Max epochs: {args.epochs}')
-    print(f'Optimiser: AdamW  weight_decay={WEIGHT_DECAY}')
+    print(f'Optimiser: Adam')
 
     splits = load_data()
     apps_to_run = [args.appliance] if args.appliance else APPLIANCES
