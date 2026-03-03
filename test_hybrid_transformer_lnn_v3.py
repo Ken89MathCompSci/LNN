@@ -185,6 +185,7 @@ def train_appliance(appliance_name, splits, device, epochs, hidden_size):
     no_improve = 0
     train_losses, val_losses = [], []
     val_mae_hist, val_sae_hist, val_f1_hist = [], [], []
+    val_time_s_hist = []
 
     for epoch in range(epochs):
         # ── Train ──
@@ -205,6 +206,7 @@ def train_appliance(appliance_name, splits, device, epochs, hidden_size):
         train_losses.append(avg_tr)
 
         # ── Validate ──
+        val_t0 = time.time()
         model.eval()
         vl_loss = 0.0
         val_preds_ep, val_trues_ep = [], []
@@ -226,9 +228,11 @@ def train_appliance(appliance_name, splits, device, epochs, hidden_size):
         val_mae_hist.append(ep_m['mae'])
         val_sae_hist.append(ep_m['sae'])
         val_f1_hist.append(ep_m['f1'])
+        val_time_s_hist.append(time.time() - val_t0)
 
         print(f"  [{appliance_name}] Epoch {epoch+1:3d}/{epochs}  "
               f"train={avg_tr:.5f}  val={avg_va:.5f}  "
+              f"val_t={val_time_s_hist[-1]:.1f}s  "
               f"lr={optimizer.param_groups[0]['lr']:.2e}")
 
         if avg_va < best_val:
@@ -244,6 +248,7 @@ def train_appliance(appliance_name, splits, device, epochs, hidden_size):
     # ── Test ──
     if best_state is not None:
         model.load_state_dict(best_state)
+    infer_t0 = time.time()
     model.eval()
     preds, trues = [], []
     with torch.no_grad():
@@ -253,17 +258,20 @@ def train_appliance(appliance_name, splits, device, epochs, hidden_size):
     y_pred = np.concatenate(preds) * y_std + y_mean
     y_true = np.concatenate(trues) * y_std + y_mean
     metrics = calculate_nilm_metrics(y_true, y_pred, threshold=thr)
+    infer_time_s = time.time() - infer_t0
 
     n_params = sum(p.numel() for p in model.parameters())
     return {
-        'metrics':      metrics,
-        'train_losses': train_losses,
-        'val_losses':   val_losses,
-        'val_mae_hist': val_mae_hist,
-        'val_sae_hist': val_sae_hist,
-        'val_f1_hist':  val_f1_hist,
-        'epochs_run':   len(train_losses),
-        'num_params':   n_params,
+        'metrics':         metrics,
+        'train_losses':    train_losses,
+        'val_losses':      val_losses,
+        'val_mae_hist':    val_mae_hist,
+        'val_sae_hist':    val_sae_hist,
+        'val_f1_hist':     val_f1_hist,
+        'val_time_s_hist': val_time_s_hist,
+        'infer_time_s':    infer_time_s,
+        'epochs_run':      len(train_losses),
+        'num_params':      n_params,
     }
 
 
@@ -382,8 +390,10 @@ def _save_appliance_json(app, r, hidden, epochs):
             'val_losses':   r['val_losses'],
             'val_mae_hist': r['val_mae_hist'],
             'val_sae_hist': r['val_sae_hist'],
-            'val_f1_hist':  r['val_f1_hist'],
-            'time_s':       r.get('time_s', None),
+            'val_f1_hist':     r['val_f1_hist'],
+            'val_time_s_hist': r.get('val_time_s_hist', []),
+            'time_s':          r.get('time_s', None),
+            'infer_time_s':    r.get('infer_time_s', None),
         }, f, indent=2)
     print(f'  JSON saved → {path}')
 
@@ -466,7 +476,7 @@ def main():
         m = r['metrics']
         print(f"  ✅ {app:15s} | F1={m['f1']:.4f}  MAE={m['mae']:.2f}  "
               f"SAE={m['sae']:.4f}  (params={r['num_params']:,})  "
-              f"time={elapsed:.1f}s")
+              f"train={elapsed:.1f}s  infer={r['infer_time_s']:.2f}s")
         _save_appliance_json(app, r, args.hidden, args.epochs)
     total_elapsed = time.time() - total_start
     print(f'\n  Total training time: {total_elapsed:.1f}s '
