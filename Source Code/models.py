@@ -1308,3 +1308,115 @@ class HybridTransformerLNNv2Model(nn.Module):
 
         # 5. Last token → prediction
         return self.fc(self.norm(x[:, -1, :]))
+
+
+# ── Hybrid Transformer-LNN v5 ─────────────────────────────────────────────────
+
+class HybridTransformerLNNv5Model(nn.Module):
+    """
+    Hybrid Transformer-LNN v5 for NILM.
+
+    Builds on HybridTransformerLNNModel (v1) with two additions inspired by
+    CNNEncoderLiquidNetworkModel and BidirectionalEncoderLiquidNetworkModel:
+
+      1. Graduated CNN channels  — hidden//4 → hidden//2 → hidden with dropout,
+                                   instead of flat hidden → hidden throughout.
+      2. Bidirectional LNN       — forward + backward LiquidODECell after the
+                                   Transformer encoder; outputs are concatenated.
+         FC input = hidden * 2.
+
+    Architecture:
+      1. Learnable encoding   — 2-layer MLP with LayerNorm
+      2. Graduated CNN        — channels grow: H//4 → H//2 → H (+ proj to H)
+      3. Transformer encoder  — global self-attention
+      4. Bidirectional LNN    — forward pass + backward pass over the sequence
+      5. Dropout + FC         — concat(h_fwd, h_bwd) → dropout → output
+    """
+
+    def __init__(self, input_size, hidden_size, output_size, dt=0.1,
+                 num_conv_layers=3, num_encoder_layers=2, num_heads=4,
+                 dropout=0.1):
+        super().__init__()
+        self.hidden_size = hidden_size
+
+        # 1. Learnable encodings (same as v1)
+        self.learnable_encoding = nn.Sequential(
+            nn.Linear(input_size, hidden_size),
+            nn.LayerNorm(hidden_size),
+            nn.GELU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.LayerNorm(hidden_size),
+        )
+
+        # 2. Graduated CNN encoder: channels grow H//4 → H//2 → H
+        channel_schedule = []
+        for i in range(num_conv_layers):
+            out_ch = hidden_size // (2 ** (num_conv_layers - 1 - i))
+            out_ch = max(out_ch, 1)
+            channel_schedule.append(out_ch)
+        # channel_schedule for hidden=256, layers=3: [64, 128, 256]
+
+        cnn_layers = []
+        in_ch = hidden_size  # after learnable_encoding projects to hidden_size
+        for out_ch in channel_schedule:
+            cnn_layers.append(nn.Sequential(
+                nn.Conv1d(in_ch, out_ch, kernel_size=3, padding=1),
+                nn.BatchNorm1d(out_ch),
+                nn.GELU(),
+                nn.Dropout(dropout),
+            ))
+            in_ch = out_ch
+        self.cnn_encoder = nn.ModuleList(cnn_layers)
+
+        # Project final conv output back to hidden_size (in case last != hidden)
+        self.cnn_proj = nn.Linear(in_ch, hidden_size) if in_ch != hidden_size \
+            else nn.Identity()
+
+        # 3. Transformer encoder
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_size,
+            nhead=num_heads,
+            dim_feedforward=hidden_size * 4,
+            dropout=dropout,
+            batch_first=True,
+            activation='gelu',
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer, num_layers=num_encoder_layers)
+
+        # 4. Bidirectional LNN: separate cells for forward and backward
+        self.liquid_fwd = LiquidODECell(hidden_size, hidden_size, dt=dt)
+        self.liquid_bwd = LiquidODECell(hidden_size, hidden_size, dt=dt)
+
+        # 5. Output: concat(h_fwd, h_bwd) → dropout → FC
+        self.dropout = nn.Dropout(dropout)
+        self.fc = nn.Linear(hidden_size * 2, output_size)
+
+    def forward(self, x):
+        batch_size, seq_len, _ = x.size()
+
+        # 1. Learnable encodings
+        x = self.learnable_encoding(x)          # (B, seq_len, H)
+
+        # 2. Graduated CNN encoder
+        x = x.transpose(1, 2)                   # (B, H, seq_len)
+        for layer in self.cnn_encoder:
+            x = layer(x)
+        x = x.transpose(1, 2)                   # (B, seq_len, last_ch)
+        x = self.cnn_proj(x)                    # (B, seq_len, H)
+
+        # 3. Transformer encoder
+        x = self.transformer_encoder(x)          # (B, seq_len, H)
+
+        # 4. Bidirectional LNN
+        h_fwd = torch.zeros(batch_size, self.hidden_size, device=x.device)
+        for t in range(seq_len):
+            h_fwd = self.liquid_fwd(x[:, t, :], h_fwd)
+
+        h_bwd = torch.zeros(batch_size, self.hidden_size, device=x.device)
+        for t in range(seq_len - 1, -1, -1):
+            h_bwd = self.liquid_bwd(x[:, t, :], h_bwd)
+
+        # 5. Concat → dropout → FC
+        h = torch.cat([h_fwd, h_bwd], dim=1)    # (B, H*2)
+        return self.fc(self.dropout(h))
