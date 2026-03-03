@@ -16,8 +16,17 @@ Reference:
   DOI: 10.1016/j.egyai.2025.100489
 
 Usage:
-    !python test_hybrid_transformer_lnn_v2.py
-    !python test_hybrid_transformer_lnn_v2.py --epochs 80 --hidden 256
+    # Run one appliance per session:
+    !python test_hybrid_transformer_lnn_v2.py --appliance fridge
+    !python test_hybrid_transformer_lnn_v2.py --appliance microwave --hidden 128
+    !python test_hybrid_transformer_lnn_v2.py --appliance "dish washer"
+    !python test_hybrid_transformer_lnn_v2.py --appliance "washer dryer"
+
+    # After all four done, generate plots:
+    !python test_hybrid_transformer_lnn_v2.py --plot
+
+    # Or run all at once (if session allows):
+    !python test_hybrid_transformer_lnn_v2.py --hidden 128
 """
 
 import sys
@@ -320,6 +329,41 @@ def plot_bar_chart(results, save_dir):
     print(f"  Saved: {path}")
 
 
+# ── Per-appliance JSON helpers ─────────────────────────────────────────────────
+
+def _save_appliance_json(app, r, hidden, epochs):
+    os.makedirs(SAVE_DIR, exist_ok=True)
+    path = os.path.join(SAVE_DIR, f'{app.replace(" ", "_")}.json')
+    with open(path, 'w') as f:
+        json.dump({
+            'appliance':    app,
+            'hidden_size':  hidden,
+            'epochs':       epochs,
+            'epochs_run':   r['epochs_run'],
+            'num_params':   r['num_params'],
+            'metrics':      {k: float(v) for k, v in r['metrics'].items()},
+            'train_losses': r['train_losses'],
+            'val_losses':   r['val_losses'],
+            'val_mae_hist': r['val_mae_hist'],
+            'val_sae_hist': r['val_sae_hist'],
+            'val_f1_hist':  r['val_f1_hist'],
+        }, f, indent=2)
+    print(f'  JSON saved → {path}')
+
+
+def _load_all_appliance_jsons():
+    results = {}
+    for app in APPLIANCES:
+        path = os.path.join(SAVE_DIR, f'{app.replace(" ", "_")}.json')
+        if os.path.exists(path):
+            with open(path) as f:
+                results[app] = json.load(f)
+            print(f'  Loaded {app} ← {path}')
+        else:
+            print(f'  Missing: {path}  (run --appliance "{app}" first)')
+    return results
+
+
 # ── Console table ──────────────────────────────────────────────────────────────
 
 def print_table(results):
@@ -348,7 +392,12 @@ def main():
     parser.add_argument('--epochs', type=int, default=EPOCHS,
                         help=f'Max training epochs (default: {EPOCHS})')
     parser.add_argument('--hidden', type=int, default=256,
-                        help='Hidden size (default: 256)')
+                        help='Hidden size (default: 256; try 128 for speed)')
+    parser.add_argument('--appliance', type=str, default=None,
+                        choices=APPLIANCES,
+                        help='Train a single appliance and save its JSON.')
+    parser.add_argument('--plot', action='store_true',
+                        help='Skip training — load saved JSONs and regenerate plots.')
     args = parser.parse_args()
 
     for fp in ['data/redd/train_small.pkl',
@@ -360,54 +409,61 @@ def main():
 
     os.makedirs(SAVE_DIR, exist_ok=True)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    # ── Plot-only mode ──
+    if args.plot:
+        print('Plot mode — loading saved per-appliance results...')
+        results = _load_all_appliance_jsons()
+        if not results:
+            print('No results found. Run at least one appliance first.')
+            sys.exit(1)
+        print('\nGenerating plots...')
+        plot_training_curves(results, SAVE_DIR)
+        plot_epoch_metrics(results, SAVE_DIR)
+        plot_bar_chart(results, SAVE_DIR)
+        print_table(results)
+        return
+
     print(f'Device: {device}')
     print(f'Hidden size: {args.hidden}  |  Max epochs: {args.epochs}')
     print('Architecture: Input Embedding → CNN (ReLU+MaxPool) → Adaptive PE '
           '→ LiquidTransformer (LNN in Q,K + GLU FFN) → FC')
 
     splits = load_data()
-    results = {}
+
+    apps_to_run = [args.appliance] if args.appliance else APPLIANCES
 
     print('\n' + '=' * 70)
     print('  Hybrid Transformer-LNN v2 — Training')
     print('=' * 70)
 
-    for app in APPLIANCES:
+    for app in apps_to_run:
         print(f'\n  ▶  {app}')
         r = train_appliance(app, splits, device, args.epochs, args.hidden)
-        results[app] = r
         m = r['metrics']
         print(f"  ✅ {app:15s} | F1={m['f1']:.4f}  MAE={m['mae']:.2f}  "
               f"SAE={m['sae']:.4f}  (params={r['num_params']:,})")
+        _save_appliance_json(app, r, args.hidden, args.epochs)
 
-    # ── Plots ──
-    print('\nGenerating plots...')
-    plot_training_curves(results, SAVE_DIR)
-    plot_epoch_metrics(results, SAVE_DIR)
-    plot_bar_chart(results, SAVE_DIR)
+    all_done = all(
+        os.path.exists(os.path.join(SAVE_DIR, f'{a.replace(" ", "_")}.json'))
+        for a in APPLIANCES
+    )
+    if all_done:
+        all_results = _load_all_appliance_jsons()
+        print('\nGenerating plots...')
+        plot_training_curves(all_results, SAVE_DIR)
+        plot_epoch_metrics(all_results, SAVE_DIR)
+        plot_bar_chart(all_results, SAVE_DIR)
+        print_table(all_results)
+    else:
+        missing = [a for a in APPLIANCES
+                   if not os.path.exists(
+                       os.path.join(SAVE_DIR, f'{a.replace(" ", "_")}.json'))]
+        print(f'\nStill missing: {missing}')
+        print('Run those, then: !python test_hybrid_transformer_lnn_v2.py --plot')
 
-    # ── Console table ──
-    print_table(results)
-
-    # ── Save JSON ──
-    json_path = os.path.join(SAVE_DIR, 'results.json')
-    with open(json_path, 'w') as f:
-        json.dump({
-            'model': 'HybridTransformerLNNv2',
-            'hidden_size': args.hidden,
-            'epochs': args.epochs,
-            'results': {
-                app: {
-                    'epochs_run': r['epochs_run'],
-                    'num_params': r['num_params'],
-                    'metrics': {k: float(v) for k, v in r['metrics'].items()},
-                }
-                for app, r in results.items()
-            }
-        }, f, indent=2)
-    print(f'\nJSON saved → {json_path}')
-    print(f'All plots  → {SAVE_DIR}/')
-    print('=' * 70)
+    print(f'All outputs → {SAVE_DIR}/')
 
 
 if __name__ == '__main__':
