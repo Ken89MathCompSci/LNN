@@ -1408,15 +1408,21 @@ class HybridTransformerLNNv5Model(nn.Module):
         # 3. Transformer encoder
         x = self.transformer_encoder(x)          # (B, seq_len, H)
 
-        # 4. Bidirectional LNN
+        # 4. Bidirectional LNN — mean-pool over all hidden states
         h_fwd = torch.zeros(batch_size, self.hidden_size, device=x.device)
+        h_fwd_states = []
         for t in range(seq_len):
             h_fwd = self.liquid_fwd(x[:, t, :], h_fwd)
+            h_fwd_states.append(h_fwd)
+        h_fwd_pool = torch.stack(h_fwd_states, dim=1).mean(dim=1)  # (B, H)
 
         h_bwd = torch.zeros(batch_size, self.hidden_size, device=x.device)
+        h_bwd_states = []
         for t in range(seq_len - 1, -1, -1):
             h_bwd = self.liquid_bwd(x[:, t, :], h_bwd)
+            h_bwd_states.append(h_bwd)
+        h_bwd_pool = torch.stack(h_bwd_states, dim=1).mean(dim=1)  # (B, H)
 
         # 5. Concat → dropout → FC
-        h = torch.cat([h_fwd, h_bwd], dim=1)    # (B, H*2)
+        h = torch.cat([h_fwd_pool, h_bwd_pool], dim=1)  # (B, H*2)
         return self.fc(self.dropout(h))

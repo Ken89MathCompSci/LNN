@@ -7,10 +7,14 @@ Builds on v4 with two structural improvements drawn from existing models:
                                instead of flat 256 → 256 → 256.
                                Each block has dropout=0.1 for regularisation.
   2. Bidirectional LNN       — forward + backward LiquidODECell after the
-                               Transformer encoder; outputs are concatenated.
-                               FC input: hidden*2 (512 for hidden=256).
+                               Transformer encoder; mean-pool over ALL hidden
+                               states (not just last). FC input: hidden*2.
   3. Dropout before FC       — 0.1 dropout on the concatenated LNN output.
   4. Adam optimizer.
+  5. Weighted MSE loss       — active samples (yb > 0 in normalised space) are
+                               weighted 5× to counter class imbalance.
+  6. PATIENCE=30             — more patience for the larger architecture.
+  7. Washer dryer threshold  — raised from 0.5W to 10.0W for fair F1 scoring.
 
 Architecture:
   Learnable Encoding → Graduated CNN (64→128→256) → Transformer Encoder
@@ -52,7 +56,7 @@ from utils import calculate_nilm_metrics
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 EPOCHS       = 80
-PATIENCE     = 20
+PATIENCE     = 30
 LR           = 1e-3
 WEIGHT_DECAY = 0.0    # Adam (no weight decay)
 BATCH        = 128
@@ -65,7 +69,7 @@ THRESHOLDS = {
     'dish washer':  10.0,
     'fridge':       10.0,
     'microwave':    10.0,
-    'washer dryer':  0.5,
+    'washer dryer': 10.0,
 }
 
 SAVE_DIR = os.path.join('results', 'hybrid_transformer_lnn_v5')
@@ -185,7 +189,9 @@ def train_appliance(appliance_name, splits, device, epochs, hidden_size):
                             leave=False):
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
-            loss = criterion(model(xb), yb)
+            out = model(xb)
+            weight = 1.0 + 4.0 * (yb > 0.0).float()  # up-weight active samples
+            loss = (weight * (out - yb) ** 2).mean()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
