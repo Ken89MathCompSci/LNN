@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import math
 import numpy as np
 
@@ -1431,3 +1432,180 @@ class HybridTransformerLNNv5Model(nn.Module):
         # 5. Concat → dropout → FC
         h = torch.cat([h_fwd_pool, h_bwd_pool], dim=1)  # (B, H*2)
         return self.fc(self.dropout(h))
+
+
+# ── Selective SSM Cell (S6-inspired) ──────────────────────────────────────────
+
+class SelectiveSSMCell(nn.Module):
+    """
+    Selective State Space cell (S6-inspired), sequential/recurrent version.
+    Drop-in replacement for LiquidODECell.
+
+    Captures the core "selectivity" of Mamba (Gu & Dao, 2023) in pure PyTorch
+    without requiring CUDA kernels — suitable for seq_len ≤ ~200.
+
+    For each timestep t:
+        dt    = Softplus(W_Δ · x_t)         input-dependent step size (≥ 0)
+        B     = sigmoid(W_B · x_t)           write gate — what to store
+        C     = sigmoid(W_C · x_t)           read  gate — what to emit
+        Ā     = exp(dt ⊙ A),  A = −exp(A_log)  discretised decay ∈ (0, 1)
+        h_new = Ā ⊙ h  +  (1 − Ā) ⊙ B ⊙ W_in · x_t
+        y     = C ⊙ h_new
+
+    Interpretation:
+      • Large dt (input spike)  → Ā ≈ 0  → new input dominates state
+      • Small dt (quiet period) → Ā ≈ 1  → old state is preserved
+    """
+
+    def __init__(self, input_size, hidden_size):
+        super().__init__()
+        self.hidden_size = hidden_size
+
+        # Fixed diagonal A, log-parameterised (always negative → stable decay)
+        # Init: A_i = -(i+1), so faster neurons have larger decay rates
+        self.A_log = nn.Parameter(
+            torch.log(torch.arange(1, hidden_size + 1, dtype=torch.float32))
+        )
+
+        # Project input to hidden space (shared basis for state update)
+        self.in_proj = nn.Linear(input_size, hidden_size, bias=False)
+
+        # Selective parameters — all functions of the current input x_t
+        self.dt_proj = nn.Linear(input_size, hidden_size)           # step size
+        self.B_proj  = nn.Linear(input_size, hidden_size, bias=False)  # write
+        self.C_proj  = nn.Linear(input_size, hidden_size, bias=False)  # read
+
+    def forward(self, x, h):
+        """
+        Args:
+            x : (batch, input_size)  — current timestep input
+            h : (batch, hidden_size) — previous hidden state
+        Returns:
+            y : (batch, hidden_size) — new state (also used as output)
+        """
+        x_proj = self.in_proj(x)                            # (B, H)
+        dt     = F.softplus(self.dt_proj(x))                # (B, H), ≥ 0
+        B      = torch.sigmoid(self.B_proj(x))              # (B, H), write gate
+        C      = torch.sigmoid(self.C_proj(x))              # (B, H), read  gate
+
+        # Discretise A: Ā = exp(Δ · A),  A = −exp(A_log) < 0
+        A     = -torch.exp(self.A_log).unsqueeze(0)         # (1, H)
+        A_bar = torch.exp(dt * A)                           # (B, H) ∈ (0, 1)
+
+        # State update (ZOH-inspired):
+        #   h_t = Ā ⊙ h_{t-1} + (1 − Ā) ⊙ B ⊙ x_proj
+        h_new = A_bar * h + (1.0 - A_bar) * B * x_proj     # (B, H)
+
+        # Selective read from state
+        y = C * h_new                                       # (B, H)
+        return y
+
+
+# ── Hybrid Transformer-SSM (v6) ───────────────────────────────────────────────
+
+class HybridTransformerSSMModel(nn.Module):
+    """
+    Hybrid Transformer + Selective SSM model for NILM (v6).
+
+    Identical architecture to HybridTransformerLNNv5Model but replaces the
+    LiquidODECell (Euler-integrated ODE) with SelectiveSSMCell (S6-inspired):
+
+      • B, C, Δ all input-dependent → model selectively updates / ignores input
+      • Closed-form discretisation  → no Euler error, more stable gradients
+      • Bidirectional (fwd + bwd)   → full sequence context before prediction
+      • Max-pool or mean-pool over all hidden states (max for bursty appliances)
+
+    Architecture:
+      Learnable Encoding → Graduated CNN (H//4 → H//2 → H)
+      → Transformer Encoder → BiDir SelectiveSSM → Dropout → FC(H*2 → 1)
+    """
+
+    def __init__(self, input_size, hidden_size, output_size,
+                 num_conv_layers=3, num_encoder_layers=2, num_heads=4,
+                 dropout=0.1, pool='mean'):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.pool = pool  # 'mean' or 'max'
+
+        # 1. Learnable encoding
+        self.learnable_encoding = nn.Sequential(
+            nn.Linear(input_size, hidden_size),
+            nn.LayerNorm(hidden_size),
+            nn.GELU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.LayerNorm(hidden_size),
+        )
+
+        # 2. Graduated CNN: channels grow H//4 → H//2 → H
+        channel_schedule = [
+            max(hidden_size // (2 ** (num_conv_layers - 1 - i)), 1)
+            for i in range(num_conv_layers)
+        ]
+        cnn_layers, in_ch = [], hidden_size
+        for out_ch in channel_schedule:
+            cnn_layers.append(nn.Sequential(
+                nn.Conv1d(in_ch, out_ch, kernel_size=3, padding=1),
+                nn.BatchNorm1d(out_ch),
+                nn.GELU(),
+                nn.Dropout(dropout),
+            ))
+            in_ch = out_ch
+        self.cnn_encoder = nn.ModuleList(cnn_layers)
+        self.cnn_proj = (nn.Linear(in_ch, hidden_size)
+                         if in_ch != hidden_size else nn.Identity())
+
+        # 3. Transformer encoder
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_size, nhead=num_heads,
+            dim_feedforward=hidden_size * 4, dropout=dropout,
+            batch_first=True, activation='gelu',
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer, num_layers=num_encoder_layers)
+
+        # 4. Bidirectional Selective SSM
+        self.ssm_fwd = SelectiveSSMCell(hidden_size, hidden_size)
+        self.ssm_bwd = SelectiveSSMCell(hidden_size, hidden_size)
+
+        # 5. Output: concat(fwd, bwd) → dropout → FC
+        self.dropout = nn.Dropout(dropout)
+        self.fc = nn.Linear(hidden_size * 2, output_size)
+
+    def forward(self, x):
+        batch_size, seq_len, _ = x.size()
+
+        # 1. Learnable encoding
+        x = self.learnable_encoding(x)            # (B, seq, H)
+
+        # 2. Graduated CNN
+        x = x.transpose(1, 2)                     # (B, H, seq)
+        for layer in self.cnn_encoder:
+            x = layer(x)
+        x = x.transpose(1, 2)                     # (B, seq, last_ch)
+        x = self.cnn_proj(x)                      # (B, seq, H)
+
+        # 3. Transformer encoder
+        x = self.transformer_encoder(x)            # (B, seq, H)
+
+        # 4. Bidirectional Selective SSM — pool over all hidden states
+        h = torch.zeros(batch_size, self.hidden_size, device=x.device)
+        fwd_states = []
+        for t in range(seq_len):
+            h = self.ssm_fwd(x[:, t, :], h)
+            fwd_states.append(h)
+        fwd_stack = torch.stack(fwd_states, dim=1)           # (B, seq, H)
+        fwd_pool  = (fwd_stack.max(dim=1).values if self.pool == 'max'
+                     else fwd_stack.mean(dim=1))             # (B, H)
+
+        h = torch.zeros(batch_size, self.hidden_size, device=x.device)
+        bwd_states = []
+        for t in range(seq_len - 1, -1, -1):
+            h = self.ssm_bwd(x[:, t, :], h)
+            bwd_states.append(h)
+        bwd_stack = torch.stack(bwd_states, dim=1)           # (B, seq, H)
+        bwd_pool  = (bwd_stack.max(dim=1).values if self.pool == 'max'
+                     else bwd_stack.mean(dim=1))             # (B, H)
+
+        # 5. Concat → dropout → FC
+        h_cat = torch.cat([fwd_pool, bwd_pool], dim=1)       # (B, H*2)
+        return self.fc(self.dropout(h_cat))
