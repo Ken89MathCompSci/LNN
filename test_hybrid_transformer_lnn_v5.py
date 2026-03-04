@@ -13,8 +13,6 @@ Builds on v4 with two structural improvements drawn from existing models:
   4. Adam optimizer.
   5. Weighted MSE loss       — active samples (yb > 0 in normalised space) are
                                weighted 5× to counter class imbalance.
-  6. PATIENCE=30             — more patience for the larger architecture.
-  7. Washer dryer threshold  — raised from 0.5W to 10.0W for fair F1 scoring.
 
 Architecture:
   Learnable Encoding → Graduated CNN (64→128→256) → Transformer Encoder
@@ -56,7 +54,7 @@ from utils import calculate_nilm_metrics
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 EPOCHS       = 80
-PATIENCE     = 30
+PATIENCE     = 20
 LR           = 1e-3
 WEIGHT_DECAY = 0.0    # Adam (no weight decay)
 BATCH        = 128
@@ -69,7 +67,7 @@ THRESHOLDS = {
     'dish washer':  10.0,
     'fridge':       10.0,
     'microwave':    10.0,
-    'washer dryer': 10.0,
+    'washer dryer':  0.5,
 }
 
 SAVE_DIR = os.path.join('results', 'hybrid_transformer_lnn_v5')
