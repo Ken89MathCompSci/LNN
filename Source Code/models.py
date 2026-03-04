@@ -1335,9 +1335,10 @@ class HybridTransformerLNNv5Model(nn.Module):
 
     def __init__(self, input_size, hidden_size, output_size, dt=0.1,
                  num_conv_layers=3, num_encoder_layers=2, num_heads=4,
-                 dropout=0.1):
+                 dropout=0.1, pool='mean'):
         super().__init__()
         self.hidden_size = hidden_size
+        self.pool = pool  # 'mean' or 'max'
 
         # 1. Learnable encodings (same as v1)
         self.learnable_encoding = nn.Sequential(
@@ -1414,14 +1415,18 @@ class HybridTransformerLNNv5Model(nn.Module):
         for t in range(seq_len):
             h_fwd = self.liquid_fwd(x[:, t, :], h_fwd)
             h_fwd_states.append(h_fwd)
-        h_fwd_pool = torch.stack(h_fwd_states, dim=1).mean(dim=1)  # (B, H)
+        h_fwd_stack = torch.stack(h_fwd_states, dim=1)              # (B, seq, H)
+        h_fwd_pool = (h_fwd_stack.max(dim=1).values if self.pool == 'max'
+                      else h_fwd_stack.mean(dim=1))                 # (B, H)
 
         h_bwd = torch.zeros(batch_size, self.hidden_size, device=x.device)
         h_bwd_states = []
         for t in range(seq_len - 1, -1, -1):
             h_bwd = self.liquid_bwd(x[:, t, :], h_bwd)
             h_bwd_states.append(h_bwd)
-        h_bwd_pool = torch.stack(h_bwd_states, dim=1).mean(dim=1)  # (B, H)
+        h_bwd_stack = torch.stack(h_bwd_states, dim=1)              # (B, seq, H)
+        h_bwd_pool = (h_bwd_stack.max(dim=1).values if self.pool == 'max'
+                      else h_bwd_stack.mean(dim=1))                 # (B, H)
 
         # 5. Concat → dropout → FC
         h = torch.cat([h_fwd_pool, h_bwd_pool], dim=1)  # (B, H*2)

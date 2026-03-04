@@ -12,7 +12,9 @@ Builds on v4 with two structural improvements drawn from existing models:
   3. Dropout before FC       — 0.1 dropout on the concatenated LNN output.
   4. Adam optimizer.
   5. Weighted MSE loss       — active samples (yb > 0 in normalised space) are
-                               weighted 5× to counter class imbalance.
+                               weighted 2× to counter class imbalance.
+  6. Appliance-specific pool — microwave uses max-pool (bursty spikes);
+                               all others use mean-pool.
 
 Architecture:
   Learnable Encoding → Graduated CNN (64→128→256) → Transformer Encoder
@@ -161,10 +163,12 @@ def train_appliance(appliance_name, splits, device, epochs, hidden_size):
     te_loader = torch.utils.data.DataLoader(
         SimpleDataset(X_te, y_te_n.reshape(-1, 1)), batch_size=BATCH, shuffle=False)
 
+    # Bursty appliances (microwave) benefit from max-pool to capture brief spikes
+    lnn_pool = 'max' if appliance_name == 'microwave' else 'mean'
     model = HybridTransformerLNNv5Model(
         input_size=1, hidden_size=hidden_size, output_size=1,
         dt=0.1, num_conv_layers=3, num_encoder_layers=2, num_heads=4,
-        dropout=0.1,
+        dropout=0.1, pool=lnn_pool,
     ).to(device)
 
     criterion = torch.nn.MSELoss()
@@ -188,7 +192,7 @@ def train_appliance(appliance_name, splits, device, epochs, hidden_size):
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
             out = model(xb)
-            weight = 1.0 + 4.0 * (yb > 0.0).float()  # up-weight active samples
+            weight = 1.0 + 1.0 * (yb > 0.0).float()  # up-weight active samples (2×)
             loss = (weight * (out - yb) ** 2).mean()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
