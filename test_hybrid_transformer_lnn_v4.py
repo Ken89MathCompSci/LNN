@@ -123,7 +123,7 @@ def _fast_epoch_metrics(y_true, y_pred, threshold):
 
 # ── Training ───────────────────────────────────────────────────────────────────
 
-def train_appliance(appliance_name, splits, device, epochs, hidden_size):
+def train_appliance(appliance_name, splits, device, epochs, hidden_size, optimizer_key='adam'):
     thr = THRESHOLDS[appliance_name]
 
     X_tr, y_tr = create_sequences(splits['train']['main'].values,
@@ -156,7 +156,13 @@ def train_appliance(appliance_name, splits, device, epochs, hidden_size):
     ).to(device)
 
     criterion = torch.nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+    _optim_map = {
+        'adam':    torch.optim.Adam,
+        'adamw':   torch.optim.AdamW,
+        'sgd':     lambda p, lr: torch.optim.SGD(p, lr=lr, momentum=0.9),
+        'rmsprop': torch.optim.RMSprop,
+    }
+    optimizer = _optim_map[optimizer_key](model.parameters(), lr=LR)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=8, min_lr=1e-5)
 
@@ -358,10 +364,8 @@ def _save_appliance_json(app, r, hidden, epochs):
             'val_losses':   r['val_losses'],
             'val_mae_hist': r['val_mae_hist'],
             'val_sae_hist': r['val_sae_hist'],
-            'val_f1_hist':     r['val_f1_hist'],
-            'val_time_s_hist': r.get('val_time_s_hist', []),
-            'time_s':          r.get('time_s', None),
-            'infer_time_s':    r.get('infer_time_s', None),
+            'val_f1_hist':  r['val_f1_hist'],
+            'time_s':       r.get('time_s', None),
         }, f, indent=2)
     print(f'  JSON saved → {path}')
 
@@ -391,6 +395,9 @@ def main():
     parser.add_argument('--appliance', type=str, default=None,
                         choices=APPLIANCES,
                         help='Train a single appliance and save its JSON.')
+    parser.add_argument('--optimizer', type=str, default='adam',
+                        choices=['adam', 'adamw', 'sgd', 'rmsprop'],
+                        help='Optimizer to use (default: adam).')
     parser.add_argument('--plot', action='store_true',
                         help='Skip training — load saved JSONs and regenerate plots.')
     args = parser.parse_args()
@@ -421,7 +428,7 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Device: {device}')
     print(f'Hidden size: {args.hidden}  |  Max epochs: {args.epochs}')
-    print(f'Optimiser: Adam')
+    print(f'Optimiser: {args.optimizer.upper()}')
 
     splits = load_data()
     apps_to_run = [args.appliance] if args.appliance else APPLIANCES
@@ -434,13 +441,13 @@ def main():
     for app in apps_to_run:
         print(f'\n  ▶  {app}')
         t0 = time.time()
-        r = train_appliance(app, splits, device, args.epochs, args.hidden)
+        r = train_appliance(app, splits, device, args.epochs, args.hidden, args.optimizer)
         elapsed = time.time() - t0
         r['time_s'] = elapsed
         m = r['metrics']
         print(f"  ✅ {app:15s} | F1={m['f1']:.4f}  MAE={m['mae']:.2f}  "
               f"SAE={m['sae']:.4f}  (params={r['num_params']:,})  "
-              f"train={elapsed:.1f}s  infer={r['infer_time_s']:.2f}s")
+              f"time={elapsed:.1f}s")
         _save_appliance_json(app, r, args.hidden, args.epochs)
     total_elapsed = time.time() - total_start
     print(f'\n  Total training time: {total_elapsed:.1f}s '
