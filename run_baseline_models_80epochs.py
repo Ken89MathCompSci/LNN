@@ -167,7 +167,7 @@ def build_model(model_key):
 
 # ── Training loop ─────────────────────────────────────────────────────────────
 
-def train_model(model_key, appliance_name, splits, device):
+def train_model(model_key, appliance_name, splits, device, optimizer_key='adam'):
     thr = THRESHOLDS[appliance_name]
 
     # Build sequences
@@ -190,7 +190,13 @@ def train_model(model_key, appliance_name, splits, device):
 
     model = build_model(model_key).to(device)
     criterion = torch.nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+    _optim_map = {
+        'adam':   torch.optim.Adam,
+        'adamw':  torch.optim.AdamW,
+        'sgd':    lambda p, lr: torch.optim.SGD(p, lr=lr, momentum=0.9),
+        'rmsprop': torch.optim.RMSprop,
+    }
+    optimizer = _optim_map[optimizer_key](model.parameters(), lr=LR)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=8, min_lr=1e-5)
 
@@ -450,7 +456,7 @@ def print_table(all_results):
 SAVE_DIR = os.path.join('results', 'baseline_80epochs')
 
 
-def run_one_model(mk, splits, device):
+def run_one_model(mk, splits, device, optimizer_key='adam'):
     """Train one model on all appliances and save its JSON + training curves."""
     os.makedirs(SAVE_DIR, exist_ok=True)
 
@@ -465,7 +471,7 @@ def run_one_model(mk, splits, device):
     for app in APPLIANCES:
         print(f"\n  ▶  {app}")
         try:
-            m, tl, vl, mae_h, sae_h, f1_h = train_model(mk, app, splits, device)
+            m, tl, vl, mae_h, sae_h, f1_h = train_model(mk, app, splits, device, optimizer_key)
             results[app] = m
             curves[app]  = (tl, vl)
             epoch_metrics[app] = {'mae': mae_h, 'sae': sae_h, 'f1': f1_h}
@@ -549,6 +555,12 @@ def main():
         help='Which model to train. Use "all" to run every model sequentially.'
     )
     parser.add_argument(
+        '--optimizer',
+        choices=['adam', 'adamw', 'sgd', 'rmsprop'],
+        default='adam',
+        help='Optimizer to use (default: adam).'
+    )
+    parser.add_argument(
         '--plot',
         action='store_true',
         help='Skip training — just load saved JSONs and regenerate graphs.'
@@ -580,7 +592,7 @@ def main():
     models_to_run = list(MODEL_LABELS.keys()) if args.model == 'all' else [args.model]
 
     for mk in models_to_run:
-        run_one_model(mk, splits, device)
+        run_one_model(mk, splits, device, args.optimizer)
 
     # If all models done, auto-generate combined plots
     all_done = all(
