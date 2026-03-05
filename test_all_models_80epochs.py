@@ -208,7 +208,7 @@ def train_and_evaluate(
     data_dict, appliance_name, model_type,
     epochs=80, lr=0.001, patience=20,
     augmentation='none', hidden_size=256, dt=0.1,
-    window_size=100
+    window_size=100, optimizer_key='adam'
 ):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -242,7 +242,13 @@ def train_and_evaluate(
 
     model     = build_model(model_type, hidden_size, dt).to(device)
     criterion = torch.nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    _optim_map = {
+        'adam':    torch.optim.Adam,
+        'adamw':   torch.optim.AdamW,
+        'sgd':     lambda p, lr: torch.optim.SGD(p, lr=lr, momentum=0.9),
+        'rmsprop': torch.optim.RMSprop,
+    }
+    optimizer = _optim_map[optimizer_key](model.parameters(), lr=lr)
 
     # ── LR scheduler ──
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -563,7 +569,7 @@ def print_table(all_results, metric_key, title):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def run(augmentation='none', epochs=80):
+def run(augmentation='none', epochs=80, optimizer_key='adam'):
     data_dict = load_data()
 
     timestamp    = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -577,6 +583,7 @@ def run(augmentation='none', epochs=80):
     print('=' * 80)
     print(f'Augmentation : {augmentation}')
     print(f'Max Epochs   : {epochs}')
+    print(f'Optimizer    : {optimizer_key.upper()}')
     print(f'Patience     : 20')
     print(f'LR Scheduler : ReduceLROnPlateau (factor=0.5, patience=8)')
     print('=' * 80)
@@ -596,6 +603,7 @@ def run(augmentation='none', epochs=80):
                     patience=20,
                     augmentation=augmentation,
                     hidden_size=256,
+                    optimizer_key=optimizer_key,
                 )
                 all_results[app][mt] = result
                 m = result['metrics']
@@ -657,6 +665,9 @@ if __name__ == '__main__':
                         help='Data augmentation mode (default: none)')
     parser.add_argument('--epochs', type=int, default=80,
                         help='Max training epochs (default: 80)')
+    parser.add_argument('--optimizer', type=str, default='adam',
+                        choices=['adam', 'adamw', 'sgd', 'rmsprop'],
+                        help='Optimizer to use (default: adam)')
     args = parser.parse_args()
 
     for fp in ['data/redd/train_small.pkl',
@@ -666,4 +677,4 @@ if __name__ == '__main__':
             print(f'❌ Missing: {fp}')
             sys.exit(1)
 
-    run(augmentation=args.augmentation, epochs=args.epochs)
+    run(augmentation=args.augmentation, epochs=args.epochs, optimizer_key=args.optimizer)
