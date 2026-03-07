@@ -355,9 +355,10 @@ def train_and_evaluate(
 
 # ── Plotting ──────────────────────────────────────────────────────────────────
 
-def plot_metric_per_appliance(all_results, metric_key, metric_label, save_dir):
+def plot_metric_per_appliance(all_results, metric_key, metric_label, save_dir, active_appliances=None):
     """One grouped bar chart per appliance for a given metric."""
-    n_apps   = len(APPLIANCES)
+    apps     = active_appliances or APPLIANCES
+    n_apps   = len(apps)
     n_models = len(MODEL_TYPES)
     x        = np.arange(n_apps)
     width    = 0.13
@@ -365,9 +366,10 @@ def plot_metric_per_appliance(all_results, metric_key, metric_label, save_dir):
 
     fig, ax = plt.subplots(figsize=(13, 6))
 
+    app_labels = [APP_LABELS[APPLIANCES.index(a)] for a in apps]
     for j, mt in enumerate(MODEL_TYPES):
         vals = []
-        for app in APPLIANCES:
+        for app in apps:
             if mt in all_results[app]:
                 vals.append(all_results[app][mt]['metrics'].get(metric_key, 0))
             else:
@@ -382,7 +384,7 @@ def plot_metric_per_appliance(all_results, metric_key, metric_label, save_dir):
                     f'{v:.2f}', ha='center', va='bottom', fontsize=7, rotation=45)
 
     ax.set_xticks(x)
-    ax.set_xticklabels(APP_LABELS, fontsize=11)
+    ax.set_xticklabels(app_labels, fontsize=11)
     ax.set_ylabel(metric_label, fontsize=12)
     ax.set_title(f'{metric_label} per Appliance — All LNN Models (80 epochs)', fontsize=13, fontweight='bold')
     ax.legend(loc='upper right', fontsize=9, ncol=2)
@@ -396,8 +398,9 @@ def plot_metric_per_appliance(all_results, metric_key, metric_label, save_dir):
     print(f"  Saved: {path}")
 
 
-def plot_summary_bar(all_results, save_dir):
+def plot_summary_bar(all_results, save_dir, active_appliances=None):
     """Single chart with MAE, SAE, F1 averages across all appliances."""
+    apps = active_appliances or APPLIANCES
     metrics_cfg = [
         ('mae', 'MAE (↓ better)',  '#E05A5A'),
         ('sae', 'SAE (↓ better)',  '#5A9AE0'),
@@ -405,7 +408,6 @@ def plot_summary_bar(all_results, save_dir):
     ]
 
     n_models = len(MODEL_TYPES)
-    n_metrics = len(metrics_cfg)
     x      = np.arange(n_models)
     width  = 0.25
     offsets = np.array([-1, 0, 1]) * width
@@ -417,7 +419,7 @@ def plot_summary_bar(all_results, save_dir):
         for mt in MODEL_TYPES:
             vals = [
                 all_results[app][mt]['metrics'].get(mkey, 0)
-                for app in APPLIANCES if mt in all_results[app]
+                for app in apps if mt in all_results[app]
             ]
             avgs.append(np.mean(vals) if vals else 0)
 
@@ -476,27 +478,28 @@ def plot_training_curves(all_results, appliance_name, save_dir):
     print(f"  Saved: {path}")
 
 
-def plot_f1_heatmap(all_results, save_dir):
+def plot_f1_heatmap(all_results, save_dir, active_appliances=None):
     """Heatmap of F1 scores: models × appliances."""
-    import matplotlib.colors as mcolors
+    apps = active_appliances or APPLIANCES
+    app_labels = [APP_LABELS[APPLIANCES.index(a)] for a in apps]
 
-    data = np.zeros((len(MODEL_TYPES), len(APPLIANCES)))
+    data = np.zeros((len(MODEL_TYPES), len(apps)))
     for i, mt in enumerate(MODEL_TYPES):
-        for j, app in enumerate(APPLIANCES):
+        for j, app in enumerate(apps):
             if mt in all_results[app]:
                 data[i, j] = all_results[app][mt]['metrics'].get('f1', 0)
 
-    fig, ax = plt.subplots(figsize=(9, 5))
+    fig, ax = plt.subplots(figsize=(max(6, 3 * len(apps)), 5))
     im = ax.imshow(data, cmap='RdYlGn', vmin=0, vmax=1, aspect='auto')
     plt.colorbar(im, ax=ax, label='F1 Score')
 
-    ax.set_xticks(range(len(APPLIANCES)))
-    ax.set_xticklabels(APP_LABELS, fontsize=11)
+    ax.set_xticks(range(len(apps)))
+    ax.set_xticklabels(app_labels, fontsize=11)
     ax.set_yticks(range(len(MODEL_TYPES)))
     ax.set_yticklabels([MODEL_LABELS[m] for m in MODEL_TYPES], fontsize=10)
 
     for i in range(len(MODEL_TYPES)):
-        for j in range(len(APPLIANCES)):
+        for j in range(len(apps)):
             ax.text(j, i, f'{data[i, j]:.3f}',
                     ha='center', va='center',
                     color='black' if 0.3 < data[i, j] < 0.7 else 'white',
@@ -511,16 +514,19 @@ def plot_f1_heatmap(all_results, save_dir):
     print(f"  Saved: {path}")
 
 
-def plot_epoch_metrics_combined(all_results, save_dir):
+def plot_epoch_metrics_combined(all_results, save_dir, active_appliances=None):
     """Val MAE, SAE, F1 across epochs — all models overlaid, one row per appliance."""
+    apps = active_appliances or APPLIANCES
     metric_info = [
         ('val_mae_hist', 'MAE (W)'),
         ('val_sae_hist', 'SAE'),
         ('val_f1_hist',  'F1'),
     ]
-    n = len(APPLIANCES)
+    n = len(apps)
     fig, axes = plt.subplots(n, 3, figsize=(15, 4 * n))
-    for row, app in enumerate(APPLIANCES):
+    if n == 1:
+        axes = axes.reshape(1, 3)
+    for row, app in enumerate(apps):
         for col, (hist_key, mk_label) in enumerate(metric_info):
             ax = axes[row, col]
             for mt in MODEL_TYPES:
@@ -545,17 +551,20 @@ def plot_epoch_metrics_combined(all_results, save_dir):
 
 # ── Print tables ──────────────────────────────────────────────────────────────
 
-def print_table(all_results, metric_key, title):
-    header = f"{'Model':<30s} | {'DishWasher':>12s} | {'Fridge':>12s} | {'Microwave':>12s} | {'Washer':>12s} | {'Avg':>10s}"
-    print(f"\n{'='*90}")
+def print_table(all_results, metric_key, title, active_appliances=None):
+    apps = active_appliances or APPLIANCES
+    col_labels = [APP_LABELS[APPLIANCES.index(a)] for a in apps]
+    sep = '=' * (32 + 14 * len(apps) + 12)
+    header = f"{'Model':<30s} | " + " | ".join(f"{l:>12s}" for l in col_labels) + f" | {'Avg':>10s}"
+    print(f"\n{sep}")
     print(f"FINAL COMPARISON — {title}")
-    print('=' * 90)
+    print(sep)
     print(header)
-    print('-' * 90)
+    print('-' * len(sep))
     for mt in MODEL_TYPES:
-        row   = f"{MODEL_LABELS[mt]:<30s}"
-        vals  = []
-        for app in APPLIANCES:
+        row  = f"{MODEL_LABELS[mt]:<30s}"
+        vals = []
+        for app in apps:
             if mt in all_results[app]:
                 v = all_results[app][mt]['metrics'].get(metric_key, float('nan'))
                 row += f" | {v:>12.4f}"
@@ -569,14 +578,20 @@ def print_table(all_results, metric_key, title):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def run(augmentation='none', epochs=80, optimizer_key='adam'):
+def run(augmentation='none', epochs=80, optimizer_key='adam', appliance_filter=None):
     data_dict = load_data()
 
     timestamp    = datetime.now().strftime('%Y%m%d_%H%M%S')
     save_dir     = f'models/comparison_80epochs_{timestamp}'
     os.makedirs(save_dir, exist_ok=True)
 
-    all_results = {app: {} for app in APPLIANCES}
+    # Filter appliances if requested
+    active_appliances = (
+        [appliance_filter] if appliance_filter and appliance_filter in APPLIANCES
+        else APPLIANCES
+    )
+
+    all_results = {app: {} for app in active_appliances}
 
     print('\n' + '=' * 80)
     print('LNN COMPREHENSIVE COMPARISON — 80 EPOCHS + LR SCHEDULER')
@@ -584,11 +599,12 @@ def run(augmentation='none', epochs=80, optimizer_key='adam'):
     print(f'Augmentation : {augmentation}')
     print(f'Max Epochs   : {epochs}')
     print(f'Optimizer    : {optimizer_key.upper()}')
+    print(f'Appliances   : {", ".join(active_appliances)}')
     print(f'Patience     : 20')
     print(f'LR Scheduler : ReduceLROnPlateau (factor=0.5, patience=8)')
     print('=' * 80)
 
-    for app in APPLIANCES:
+    for app in active_appliances:
         print(f"\n{'='*80}")
         print(f"  APPLIANCE: {app.upper()}")
         print('=' * 80)
@@ -613,20 +629,20 @@ def run(augmentation='none', epochs=80, optimizer_key='adam'):
                 print(f"     ERROR: {e}")
 
     # ── Print summary tables ──
-    print_table(all_results, 'f1',  'F1 SCORES')
-    print_table(all_results, 'mae', 'MAE SCORES')
-    print_table(all_results, 'sae', 'SAE SCORES')
+    print_table(all_results, 'f1',  'F1 SCORES',  active_appliances)
+    print_table(all_results, 'mae', 'MAE SCORES', active_appliances)
+    print_table(all_results, 'sae', 'SAE SCORES', active_appliances)
 
     # ── Generate plots ──
     print('\nGenerating plots...')
-    plot_metric_per_appliance(all_results, 'mae', 'MAE (Watts)',  save_dir)
-    plot_metric_per_appliance(all_results, 'sae', 'SAE',          save_dir)
-    plot_metric_per_appliance(all_results, 'f1',  'F1 Score',     save_dir)
-    plot_summary_bar(all_results, save_dir)
-    plot_f1_heatmap(all_results, save_dir)
-    plot_epoch_metrics_combined(all_results, save_dir)
+    plot_metric_per_appliance(all_results, 'mae', 'MAE (Watts)',  save_dir, active_appliances)
+    plot_metric_per_appliance(all_results, 'sae', 'SAE',          save_dir, active_appliances)
+    plot_metric_per_appliance(all_results, 'f1',  'F1 Score',     save_dir, active_appliances)
+    plot_summary_bar(all_results, save_dir, active_appliances)
+    plot_f1_heatmap(all_results, save_dir, active_appliances)
+    plot_epoch_metrics_combined(all_results, save_dir, active_appliances)
 
-    for app in APPLIANCES:
+    for app in active_appliances:
         plot_training_curves(all_results, app, save_dir)
 
     # ── Save JSON ──
@@ -668,6 +684,9 @@ if __name__ == '__main__':
     parser.add_argument('--optimizer', type=str, default='adam',
                         choices=['adam', 'adamw', 'sgd', 'rmsprop'],
                         help='Optimizer to use (default: adam)')
+    parser.add_argument('--appliance', type=str, default=None,
+                        choices=['dish washer', 'fridge', 'microwave', 'washer dryer'],
+                        help='Train a single appliance only (default: all)')
     args = parser.parse_args()
 
     for fp in ['data/redd/train_small.pkl',
@@ -677,4 +696,5 @@ if __name__ == '__main__':
             print(f'❌ Missing: {fp}')
             sys.exit(1)
 
-    run(augmentation=args.augmentation, epochs=args.epochs, optimizer_key=args.optimizer)
+    run(augmentation=args.augmentation, epochs=args.epochs,
+        optimizer_key=args.optimizer, appliance_filter=args.appliance)

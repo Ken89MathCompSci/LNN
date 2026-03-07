@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:www.peeref.com)",
+      "WebFetch(domain:www.ivysci.com)"
+    ]
+  }
+}
