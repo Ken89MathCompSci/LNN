@@ -266,7 +266,7 @@ class AdvancedLiquidTimeLayer(nn.Module):
         # Adaptive time constants — softplus ensures tau_base > 0, clamp prevents near-zero
         tau_base = torch.nn.functional.softplus(self.tau_base).unsqueeze(0)
         tau_mod = self.sigmoid(self.tau_mod(x))
-        tau = (tau_base * tau_mod).clamp(min=1e-3)
+        tau = (tau_base * tau_mod).clamp(min=self.dt)  # Euler stability: tau >= dt
 
         # Input-dependent gate
         combined = torch.cat([x, hidden], dim=1)
