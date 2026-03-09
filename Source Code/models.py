@@ -181,7 +181,7 @@ class LiquidTimeLayer(nn.Module):
         dh = (-hidden / self.tau.unsqueeze(0) + f_t) * self.dt
         
         # Update hidden state
-        new_hidden = hidden + dh
+        new_hidden = (hidden + dh).clamp(-10.0, 10.0)  # bound hidden state to prevent BPTT explosion
         
         return new_hidden
 
@@ -276,7 +276,7 @@ class AdvancedLiquidTimeLayer(nn.Module):
         f_t = self.tanh(input_proj + rec_proj)
         dh = ((-hidden / tau) + gate * f_t) * self.dt
 
-        new_hidden = hidden + dh
+        new_hidden = (hidden + dh).clamp(-10.0, 10.0)  # bound hidden state to prevent BPTT explosion
 
         return new_hidden
 
@@ -786,7 +786,7 @@ class LiquidODECell(nn.Module):
         dh = (-hidden / self.tau.unsqueeze(0) + f_t) * self.dt
 
         # Update hidden state
-        new_hidden = hidden + dh
+        new_hidden = (hidden + dh).clamp(-10.0, 10.0)  # bound hidden state to prevent BPTT explosion
 
         return new_hidden
 
