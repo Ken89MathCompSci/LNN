@@ -230,65 +230,54 @@ class AdvancedLiquidTimeLayer(nn.Module):
         super(AdvancedLiquidTimeLayer, self).__init__()
         self.hidden_size = hidden_size
         self.dt = dt
-        
+
         # Input projection
         self.input_proj = nn.Linear(input_size, hidden_size)
-        
-        # Base time constants
+
+        # Base time constants — stored in log-space so softplus keeps them positive
         self.tau_base = nn.Parameter(torch.ones(hidden_size))
-        
+
         # Adaptive time constants modulation
         self.tau_mod = nn.Linear(input_size, hidden_size)
-        
+
         # Recurrent weights
         self.rec_weights = nn.Parameter(torch.Tensor(hidden_size, hidden_size))
         nn.init.xavier_uniform_(self.rec_weights)
-        
+
         # Gate for controlling information flow
         self.gate = nn.Linear(input_size + hidden_size, hidden_size)
-        
+
         # Activation functions
         self.tanh = nn.Tanh()
         self.sigmoid = nn.Sigmoid()
-    
+
     def forward(self, x, hidden=None):
-        """
-        Forward pass with advanced Euler integration
-        
-        Args:
-            x: Input tensor of shape (batch_size, input_size)
-            hidden: Hidden state tensor of shape (batch_size, hidden_size)
-            
-        Returns:
-            New hidden state
-        """
         batch_size = x.size(0)
-        
-        # Initialize hidden state if not provided
+
         if hidden is None:
             hidden = torch.zeros(batch_size, self.hidden_size, device=x.device)
-        
+
         # Input projection
         input_proj = self.input_proj(x)
-        
+
         # Recurrent projection
         rec_proj = torch.matmul(hidden, self.rec_weights)
-        
-        # Adaptive time constants
+
+        # Adaptive time constants — softplus ensures tau_base > 0, clamp prevents near-zero
+        tau_base = torch.nn.functional.softplus(self.tau_base).unsqueeze(0)
         tau_mod = self.sigmoid(self.tau_mod(x))
-        tau = self.tau_base.unsqueeze(0) * tau_mod  # Element-wise multiplication
-        
+        tau = (tau_base * tau_mod).clamp(min=1e-3)
+
         # Input-dependent gate
         combined = torch.cat([x, hidden], dim=1)
         gate = self.sigmoid(self.gate(combined))
-        
+
         # ODE integration with gating
         f_t = self.tanh(input_proj + rec_proj)
         dh = ((-hidden / tau) + gate * f_t) * self.dt
-        
-        # Update hidden state
+
         new_hidden = hidden + dh
-        
+
         return new_hidden
 
 class AdvancedLiquidNetworkModel(nn.Module):
@@ -297,7 +286,7 @@ class AdvancedLiquidNetworkModel(nn.Module):
         super(AdvancedLiquidNetworkModel, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
-        
+
         # Multiple liquid time layers
         self.liquid_layers = nn.ModuleList([
             AdvancedLiquidTimeLayer(
@@ -306,40 +295,29 @@ class AdvancedLiquidNetworkModel(nn.Module):
                 dt
             ) for i in range(num_layers)
         ])
-        
+
+        # LayerNorm between stacked layers to prevent hidden state explosion
+        self.layer_norms = nn.ModuleList([
+            nn.LayerNorm(hidden_size) for _ in range(num_layers)
+        ])
+
         # Output layer
         self.fc = nn.Linear(hidden_size, output_size)
-    
+
     def forward(self, x):
-        """
-        Forward pass
-        
-        Args:
-            x: Input tensor of shape (batch_size, sequence_length, input_size)
-            
-        Returns:
-            Output tensor
-        """
-        # x shape: (batch_size, sequence_length, input_size)
         batch_size, seq_length, _ = x.size()
-        
-        # Initialize hidden states for each layer
+
         hidden_states = [None] * self.num_layers
-        
-        # Process each time step
+
         for t in range(seq_length):
             x_t = x[:, t, :]
-            
-            # Process through each layer
+
             for i in range(self.num_layers):
-                if i == 0:
-                    hidden_states[i] = self.liquid_layers[i](x_t, hidden_states[i])
-                else:
-                    hidden_states[i] = self.liquid_layers[i](hidden_states[i-1], hidden_states[i])
-        
-        # Use the final hidden state from the last layer for prediction
-        output = self.fc(hidden_states[-1])
-        
+                inp = x_t if i == 0 else self.layer_norms[i - 1](hidden_states[i - 1])
+                hidden_states[i] = self.liquid_layers[i](inp, hidden_states[i])
+
+        output = self.fc(self.layer_norms[-1](hidden_states[-1]))
+
         return output
 
 class ResidualBlock(nn.Module):

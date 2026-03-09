@@ -578,7 +578,7 @@ def print_table(all_results, metric_key, title, active_appliances=None):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def run(augmentation='none', epochs=80, optimizer_key='adam', appliance_filter=None):
+def run(augmentation='none', epochs=80, optimizer_key='adam', appliance_filter=None, model_filter=None):
     data_dict = load_data()
 
     timestamp    = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -591,6 +591,12 @@ def run(augmentation='none', epochs=80, optimizer_key='adam', appliance_filter=N
         else APPLIANCES
     )
 
+    # Filter models if requested
+    active_models = (
+        [model_filter] if model_filter and model_filter in MODEL_TYPES
+        else MODEL_TYPES
+    )
+
     all_results = {app: {} for app in active_appliances}
 
     print('\n' + '=' * 80)
@@ -600,6 +606,7 @@ def run(augmentation='none', epochs=80, optimizer_key='adam', appliance_filter=N
     print(f'Max Epochs   : {epochs}')
     print(f'Optimizer    : {optimizer_key.upper()}')
     print(f'Appliances   : {", ".join(active_appliances)}')
+    print(f'Models       : {", ".join(MODEL_LABELS[m] for m in active_models)}')
     print(f'Patience     : 20')
     print(f'LR Scheduler : ReduceLROnPlateau (factor=0.5, patience=8)')
     print('=' * 80)
@@ -609,7 +616,7 @@ def run(augmentation='none', epochs=80, optimizer_key='adam', appliance_filter=N
         print(f"  APPLIANCE: {app.upper()}")
         print('=' * 80)
 
-        for mt in MODEL_TYPES:
+        for mt in active_models:
             print(f"\n  >> {MODEL_LABELS[mt]}")
             try:
                 result = train_and_evaluate(
@@ -687,6 +694,10 @@ if __name__ == '__main__':
     parser.add_argument('--appliance', type=str, default=None,
                         choices=['dish washer', 'fridge', 'microwave', 'washer dryer'],
                         help='Train a single appliance only (default: all)')
+    parser.add_argument('--model', type=str, default=None,
+                        choices=list(MODEL_TYPES),
+                        help='Train a single model only (default: all). '
+                             f'Choices: {", ".join(MODEL_TYPES)}')
     args = parser.parse_args()
 
     for fp in ['data/redd/train_small.pkl',
@@ -697,4 +708,5 @@ if __name__ == '__main__':
             sys.exit(1)
 
     run(augmentation=args.augmentation, epochs=args.epochs,
-        optimizer_key=args.optimizer, appliance_filter=args.appliance)
+        optimizer_key=args.optimizer, appliance_filter=args.appliance,
+        model_filter=args.model)
