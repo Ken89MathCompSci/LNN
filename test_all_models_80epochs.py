@@ -27,6 +27,7 @@ sys.path.append('Source Code')
 from models import (
     LiquidNetworkModel,
     AdvancedLiquidNetworkModel,
+    AdvancedLiquidNetworkModelTwo,
     AttentionLiquidNetworkModel,
     CNNEncoderLiquidNetworkModel,
     TransformerEncoderLiquidNetworkModel,
@@ -39,6 +40,7 @@ from utils import calculate_nilm_metrics
 MODEL_TYPES = [
     'standard_lnn',
     'advanced_lnn',
+    'advanced_lnn_two',
     'attention_lnn',
     'cnn_encoder',
     'transformer_encoder',
@@ -48,6 +50,7 @@ MODEL_TYPES = [
 MODEL_LABELS = {
     'standard_lnn':        'Standard LNN',
     'advanced_lnn':        'Advanced LNN',
+    'advanced_lnn_two':    'Advanced LNN Two',
     'attention_lnn':       'Attention LNN',
     'cnn_encoder':         'CNN + LNN',
     'transformer_encoder': 'Transformer + LNN',
@@ -57,6 +60,7 @@ MODEL_LABELS = {
 MODEL_COLORS = {
     'standard_lnn':        '#4C72B0',
     'advanced_lnn':        '#DD8452',
+    'advanced_lnn_two':    '#E8A838',
     'attention_lnn':       '#55A868',
     'cnn_encoder':         '#C44E52',
     'transformer_encoder': '#8172B2',
@@ -161,6 +165,8 @@ def build_model(model_type, hidden_size=256, dt=0.1):
         return LiquidNetworkModel(input_size, hidden_size, output_size, dt=dt)
     elif model_type == 'advanced_lnn':
         return AdvancedLiquidNetworkModel(input_size, hidden_size, output_size, num_layers=2, dt=dt)
+    elif model_type == 'advanced_lnn_two':
+        return AdvancedLiquidNetworkModelTwo(input_size, hidden_size, output_size, num_layers=2, dt=dt)
     elif model_type == 'attention_lnn':
         return AttentionLiquidNetworkModel(input_size, hidden_size, output_size, dt=dt, num_heads=4)
     elif model_type == 'cnn_encoder':

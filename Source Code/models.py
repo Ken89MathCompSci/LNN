@@ -320,6 +320,54 @@ class AdvancedLiquidNetworkModel(nn.Module):
 
         return output
 
+class AdvancedLiquidNetworkModelTwo(nn.Module):
+    """Advanced LNN v2 — adds intra-layer LayerNorm (normalises h_{t-1} each timestep)
+    in addition to the inter-layer LayerNorm between stacked layers."""
+    def __init__(self, input_size, hidden_size, output_size, num_layers=2, dt=0.1):
+        super(AdvancedLiquidNetworkModelTwo, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+
+        self.liquid_layers = nn.ModuleList([
+            AdvancedLiquidTimeLayer(
+                input_size if i == 0 else hidden_size,
+                hidden_size,
+                dt
+            ) for i in range(num_layers)
+        ])
+
+        # Inter-layer LayerNorm: normalises hidden state crossing layer boundaries
+        self.layer_norms = nn.ModuleList([
+            nn.LayerNorm(hidden_size) for _ in range(num_layers)
+        ])
+
+        # Intra-layer LayerNorm: normalises h_{t-1} before each timestep recurrence
+        self.intra_norms = nn.ModuleList([
+            nn.LayerNorm(hidden_size) for _ in range(num_layers)
+        ])
+
+        self.fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        batch_size, seq_length, _ = x.size()
+
+        hidden_states = [None] * self.num_layers
+
+        for t in range(seq_length):
+            x_t = x[:, t, :]
+
+            for i in range(self.num_layers):
+                # Inter: normalise signal coming from previous layer
+                inp = x_t if i == 0 else self.layer_norms[i - 1](hidden_states[i - 1])
+                # Intra: normalise h_{t-1} before feeding back into same layer
+                h_prev = (self.intra_norms[i](hidden_states[i])
+                          if hidden_states[i] is not None else None)
+                hidden_states[i] = self.liquid_layers[i](inp, h_prev)
+
+        output = self.fc(self.layer_norms[-1](hidden_states[-1]))
+
+        return output
+
 class ResidualBlock(nn.Module):
     """Residual block for ResNet architecture"""
     def __init__(self, in_channels, out_channels, stride=1):
