@@ -932,6 +932,70 @@ class CNNEncoderLiquidNetworkModel(nn.Module):
         return output
 
 
+class TCNLiquidNetworkModel(nn.Module):
+    """
+    TCN Encoder + Basic Liquid Neural Network for NILM.
+
+    Architecture:
+        Input -> TCN Blocks (dilated conv, feature extraction) -> Linear projection
+              -> LiquidODECell (ODE recurrence) -> FC -> Output
+
+    TCN handles local pattern extraction with exponentially growing receptive field.
+    The basic LNN ODE cell integrates temporal dynamics over the sequence.
+    """
+    def __init__(self, input_size, hidden_size, output_size, dt=0.1,
+                 num_channels=None, kernel_size=3, dropout=0.2):
+        super(TCNLiquidNetworkModel, self).__init__()
+        self.hidden_size = hidden_size
+        self.dt = dt
+
+        if num_channels is None:
+            num_channels = [32, 64, 128]
+
+        # TCN Encoder: stack of dilated TCNBlocks
+        tcn_layers = []
+        in_ch = input_size
+        for i, out_ch in enumerate(num_channels):
+            dilation = 2 ** i
+            tcn_layers.append(TCNBlock(in_ch, out_ch, kernel_size, dilation, dropout))
+            in_ch = out_ch
+        self.tcn_encoder = nn.Sequential(*tcn_layers)
+
+        # Project TCN output channels to hidden_size
+        self.encoder_projection = nn.Linear(num_channels[-1], hidden_size)
+
+        # Basic LNN ODE cell
+        self.liquid = LiquidODECell(hidden_size, hidden_size, dt=dt)
+
+        # Output layer
+        self.fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        """
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, input_size)
+
+        Returns:
+            Output tensor of shape (batch_size, output_size)
+        """
+        batch_size, seq_len, _ = x.size()
+
+        # TCN expects (batch_size, channels, seq_len)
+        x = x.transpose(1, 2)
+        x = self.tcn_encoder(x)                  # (batch_size, num_channels[-1], seq_len)
+        x = x.transpose(1, 2)                    # (batch_size, seq_len, num_channels[-1])
+
+        # Project to hidden size
+        x = self.encoder_projection(x)           # (batch_size, seq_len, hidden_size)
+
+        # Step through LNN ODE cell
+        h = torch.zeros(batch_size, self.hidden_size, device=x.device)
+        for t in range(seq_len):
+            h = self.liquid(x[:, t, :], h)
+
+        return self.fc(h)
+
+
 class TransformerEncoderLiquidNetworkModel(nn.Module):
     """
     Transformer Encoder + Liquid Neural Network for NILM.
