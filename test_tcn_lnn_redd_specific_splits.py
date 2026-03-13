@@ -8,6 +8,7 @@ from datetime import datetime
 from tqdm import tqdm
 import pickle
 import pandas as pd
+from sklearn.preprocessing import MinMaxScaler
 
 # Add Source Code to path
 sys.path.append('Source Code')
@@ -176,11 +177,23 @@ def train_tcn_lnn_on_specific_redd_appliance(data_dict, appliance_name, window_s
     y_train = train_data[appliance_name].iloc[::5].values.reshape(-1, 1)[:len(X_train)]
     y_val = val_data[appliance_name].iloc[::5].values.reshape(-1, 1)[:len(X_val)]
     y_test = test_data[appliance_name].iloc[::5].values.reshape(-1, 1)[:len(X_test)]
-    
+
+    # Normalise inputs and targets to [0, 1] — critical for LNN clamp stability
+    x_scaler = MinMaxScaler()
+    y_scaler = MinMaxScaler()
+
+    X_train = x_scaler.fit_transform(X_train.reshape(-1, 1)).reshape(X_train.shape)
+    X_val   = x_scaler.transform(X_val.reshape(-1, 1)).reshape(X_val.shape)
+    X_test  = x_scaler.transform(X_test.reshape(-1, 1)).reshape(X_test.shape)
+
+    y_train = y_scaler.fit_transform(y_train)
+    y_val   = y_scaler.transform(y_val)
+    y_test  = y_scaler.transform(y_test)
+
     print(f"Training sequences: {X_train.shape} -> {y_train.shape}")
     print(f"Validation sequences: {X_val.shape} -> {y_val.shape}")
     print(f"Test sequences: {X_test.shape} -> {y_test.shape}")
-    
+
     # Create datasets and dataloaders
     train_dataset = REDDSpecificDataset(X_train, y_train)
     val_dataset = REDDSpecificDataset(X_val, y_val)
@@ -293,7 +306,7 @@ def train_tcn_lnn_on_specific_redd_appliance(data_dict, appliance_name, window_s
         all_targets = np.concatenate(all_targets)
         all_outputs = np.concatenate(all_outputs)
         threshold = get_threshold_for_appliance(appliance_name)
-        metrics = calculate_nilm_metrics(all_targets, all_outputs, threshold=threshold)
+        metrics = calculate_nilm_metrics(all_targets, all_outputs, threshold=threshold, scaler=y_scaler)
         history['val_metrics'].append(metrics)
         
         # Print epoch stats
