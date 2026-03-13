@@ -143,7 +143,7 @@ def train_tcn_lnn_model(data_dict, model_params, train_params, save_dir='models'
         history['val_metrics'].append(metrics)
         
         # Print epoch stats
-        print(f"Epoch {epoch+1}/{epochs}, Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}, Val MAE: {metrics['mae']:.2f}, Val F1: {metrics['f1']:.4f}")
+        print(f"Epoch {epoch+1}/{epochs}, Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}, Val MAE: {metrics['mae']:.2f}, Val SAE: {metrics['sae']:.4f}, Val F1: {metrics['f1']:.4f}")
         
         # Early stopping check
         if avg_val_loss < best_val_loss:
@@ -296,7 +296,8 @@ def train_tcn_lnn_all_appliances(house_number=1, window_size=100, save_dir='mode
             results[appliance_name] = {
                 'model_path': best_model_path,
                 'appliance_index': appliance_idx,
-                'final_metrics': history['val_metrics'][-1] if history['val_metrics'] else None
+                'final_metrics': history['val_metrics'][-1] if history['val_metrics'] else None,
+                'history': history,
             }
             
             # Log success
@@ -321,10 +322,44 @@ def train_tcn_lnn_all_appliances(house_number=1, window_size=100, save_dir='mode
     
     with open(os.path.join(base_save_dir, 'summary.json'), 'w') as f:
         json.dump(summary, f, indent=4)
-    
+
+    # Combined val metrics plot (appliances x metrics grid)
+    trained = {name: info for name, info in results.items()
+               if info.get('history') and info['history']['val_metrics']}
+    if trained:
+        n_apps = len(trained)
+        fig, axes = plt.subplots(n_apps, 3, figsize=(15, 4 * n_apps))
+        if n_apps == 1:
+            axes = [axes]
+        fig.suptitle(f'Val Metrics per Epoch — TCN-LNN (80 epochs)', fontsize=13, fontweight='bold')
+
+        for row, (app_name, info) in enumerate(trained.items()):
+            vm = info['history']['val_metrics']
+            epochs_x = range(1, len(vm) + 1)
+            mae_vals = [m['mae']  for m in vm]
+            sae_vals = [m['sae']  for m in vm]
+            f1_vals  = [m['f1']   for m in vm]
+
+            for col, (vals, ylabel, title) in enumerate([
+                (mae_vals, 'MAE (W)',  f'{app_name} — MAE (W)'),
+                (sae_vals, 'SAE',      f'{app_name} — SAE'),
+                (f1_vals,  'F1',       f'{app_name} — F1'),
+            ]):
+                ax = axes[row][col]
+                ax.plot(epochs_x, vals, color='#29B5C8', linewidth=1.5)
+                ax.set_title(title, fontsize=10)
+                ax.set_xlabel('Epoch', fontsize=8)
+                ax.set_ylabel(ylabel, fontsize=8)
+                ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(base_save_dir, 'tcn_lnn_val_metrics.png'), dpi=150, bbox_inches='tight')
+        plt.close()
+        print(f"Val metrics plot saved to {base_save_dir}/tcn_lnn_val_metrics.png")
+
     print("\nTCN-LNN training completed for all appliances!")
     print(f"Results saved to {base_save_dir}")
-    
+
     return results, base_save_dir
 
 if __name__ == "__main__":
