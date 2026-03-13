@@ -261,6 +261,7 @@ def train_tcn_lnn_on_specific_redd_appliance(data_dict, appliance_name, window_s
             
             # Backward pass and optimize
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             
             # Update statistics
@@ -302,11 +303,11 @@ def train_tcn_lnn_on_specific_redd_appliance(data_dict, appliance_name, window_s
         # Update learning rate scheduler
         scheduler.step(avg_val_loss)
         
-        # Calculate NILM metrics with appliance-specific threshold
-        all_targets = np.concatenate(all_targets)
-        all_outputs = np.concatenate(all_outputs)
+        # Inverse transform to watts before metrics
+        all_targets = y_scaler.inverse_transform(np.concatenate(all_targets).reshape(-1, 1)).flatten()
+        all_outputs = y_scaler.inverse_transform(np.concatenate(all_outputs).reshape(-1, 1)).flatten()
         threshold = get_threshold_for_appliance(appliance_name)
-        metrics = calculate_nilm_metrics(all_targets, all_outputs, threshold=threshold, scaler=y_scaler)
+        metrics = calculate_nilm_metrics(all_targets, all_outputs, threshold=threshold)
         history['val_metrics'].append(metrics)
         
         # Print epoch stats
@@ -379,9 +380,9 @@ def train_tcn_lnn_on_specific_redd_appliance(data_dict, appliance_name, window_s
     # Calculate average test loss
     avg_test_loss = test_loss / len(test_loader)
     
-    # Calculate test metrics with appliance-specific threshold
-    all_test_targets = np.concatenate(all_test_targets)
-    all_test_outputs = np.concatenate(all_test_outputs)
+    # Inverse transform to watts then calculate test metrics
+    all_test_targets = y_scaler.inverse_transform(np.concatenate(all_test_targets).reshape(-1, 1)).flatten()
+    all_test_outputs = y_scaler.inverse_transform(np.concatenate(all_test_outputs).reshape(-1, 1)).flatten()
     threshold = get_threshold_for_appliance(appliance_name)
     test_metrics = calculate_nilm_metrics(all_test_targets, all_test_outputs, threshold=threshold)
 
