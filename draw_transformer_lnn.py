@@ -1,5 +1,5 @@
+import os
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 from matplotlib.patches import FancyBboxPatch
 
 fig, ax = plt.subplots(figsize=(16, 11))
@@ -32,7 +32,7 @@ label(ax, 8, 10.65, 'TRANSFORMER ENCODER + LNN', fs=17, bold=True)
 label(ax, 8, 10.3, 'Architecture for NILM', fs=10, color='#555555', italic=True)
 
 # outer border
-rbox(ax, 0.2, 0.25, 15.6, 9.75, fc='none', ec='#8B4513', lw=2.5, zorder=1)
+rbox(ax, 0.2, 0.25, 15.6, 9.75, fc='none', ec='#37474F', lw=2.0, zorder=1)
 
 # ══════════════════════════════════════════════════════════════════════════
 #  LEFT  –  TRANSFORMER ENCODER BLOCK
@@ -118,7 +118,9 @@ ax.annotate('', xy=(5.35, 1.1), xytext=(5.2, 1.1),
             arrowprops=dict(arrowstyle='->', color='#F9A825', lw=1.5))
 
 # ── E(x) output arrow ─────────────────────────────────────────────────────
-arr(ax, 8.2, 1.1, 8.75, 1.1, color='#1565C0', lw=2.2)
+# Horizontal exit from encoder block, then vertical up to LNN entry height
+arr(ax, 8.2, 1.1, 8.72, 1.1, color='#1565C0', lw=2.2)
+ax.plot([8.72, 8.72], [1.1, 4.3], color='#1565C0', lw=2.0, zorder=5)
 label(ax, 8.47, 1.42, 'E(x)', fs=10, bold=True, color='#1565C0')
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -136,7 +138,7 @@ label(ax, 11.0, 6.9, 'Continuous-Time Dynamics', fs=9.5, color='#333333')
 label(ax, 11.0, 6.45, 'dh/dt  =  − h/τ  +  f( E(x) + Uh )', fs=10,
       color='#000000', bold=True)
 
-label(ax, 11.0, 5.95, '─────────────────────────────', fs=8, color='#BBBBBB')
+ax.plot([9.1, 12.9], [5.75, 5.75], color='#CCCCCC', lw=1.0, zorder=5)
 
 label(ax, 11.0, 5.6, 'Euler discretisation:', fs=8.5, color='#555555', italic=True)
 label(ax, 11.0, 5.25, 'h[t] = h[t−1] + Δt · f( h[t−1], x[t] )', fs=9,
@@ -144,11 +146,12 @@ label(ax, 11.0, 5.25, 'h[t] = h[t−1] + Δt · f( h[t−1], x[t] )', fs=9,
 label(ax, 11.0, 4.9, 'Sequential update   t = 0 → 99', fs=8.5, color='#666666',
       italic=True)
 
-label(ax, 11.0, 4.4, '─────────────────────────────', fs=8, color='#BBBBBB')
+ax.plot([9.1, 12.9], [4.55, 4.55], color='#CCCCCC', lw=1.0, zorder=5)
 
 rbox(ax, 9.25, 3.65, 1.5, 0.55, fc='#FFCCBC', ec='#E65100', lw=1.2, zorder=5)
 label(ax, 10.0, 3.93, 'τ  (Time Constant)', fs=8.5, color='#BF360C')
-ax.annotate('', xy=(9.25+0.75, 3.65+0.55), xytext=(9.25+0.75, 3.65+0.55+0.3),
+# τ arrow points UP into the ODE equations
+ax.annotate('', xy=(10.0, 4.55), xytext=(10.0, 4.2),
             arrowprops=dict(arrowstyle='->', color='#E65100', lw=1.3))
 
 # ── Hidden state feedback loop ────────────────────────────────────────────
@@ -180,9 +183,8 @@ arr(ax, 13.3, 8.05, 13.3, 7.35, color='#2E7D32', lw=1.8)
 # Arrow: recurrent projection → LNN
 arr(ax, 12.0, 6.97, 11.05, 6.0, color='#2E7D32', lw=1.8)
 
-# E(x) arrow into LNN
-arr(ax, 8.75, 4.3, 8.95, 4.3, color='#1565C0', lw=2)
-label(ax, 8.85, 4.6, 'E(x)', fs=9, bold=True, color='#1565C0')
+# E(x) enters LNN (connected via vertical line drawn above)
+arr(ax, 8.72, 4.3, 8.95, 4.3, color='#1565C0', lw=2)
 
 # ── Output ────────────────────────────────────────────────────────────────
 # Arrow from LNN bottom to output layer
@@ -218,6 +220,7 @@ ax.text(8, 0.13, cap, ha='center', va='center', fontsize=7.8,
         color='#333333', style='italic', zorder=5)
 
 plt.tight_layout(pad=0.3)
-plt.savefig(r'c:\Users\MathK\OneDrive\Desktop\PhD_Slides\LNN\transformer_lnn_diagram.png',
-            dpi=150, bbox_inches='tight', facecolor='#FFFBF0')
-print('Saved!')
+save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         'transformer_lnn_diagram.png')
+plt.savefig(save_path, dpi=150, bbox_inches='tight', facecolor='#FFFBF0')
+print(f'Saved → {save_path}')
