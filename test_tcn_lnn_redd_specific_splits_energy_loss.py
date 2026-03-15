@@ -18,22 +18,33 @@ from models import TCNLiquidNetworkModel
 from utils import calculate_nilm_metrics, save_model
 
 
-class CombinedMAEEnergyLoss(torch.nn.Module):
+class WeightedMAEEnergyLoss(torch.nn.Module):
     """
-    Loss = lambda1 * MAE + lambda2 * |sum(pred) - sum(target)| / N
+    Loss = lambda1 * weighted_MAE + lambda2 * |sum(pred) - sum(target)| / N
 
-    The energy term penalises global bias directly, targeting SAE.
+    weighted_MAE applies `on_weight` to samples where target > on_threshold_norm
+    and 1.0 to OFF samples.  This prevents the model collapsing to predict-zero
+    on heavily imbalanced appliances (e.g. dish washer ON only 4% of the time).
+
+    on_weight is capped at 30x to avoid gradient instability.
     Both terms operate in normalised [0,1] space during training.
     """
-    def __init__(self, lambda1=1.0, lambda2=0.1):
+    def __init__(self, on_weight, on_threshold_norm, lambda1=1.0, lambda2=0.1):
         super().__init__()
+        self.on_weight = min(float(on_weight), 30.0)
+        self.on_threshold_norm = float(on_threshold_norm)
         self.lambda1 = lambda1
         self.lambda2 = lambda2
 
     def forward(self, pred, target):
-        mae = torch.mean(torch.abs(pred - target))
+        weights = torch.where(
+            target > self.on_threshold_norm,
+            torch.full_like(target, self.on_weight),
+            torch.ones_like(target)
+        )
+        weighted_mae = torch.mean(weights * torch.abs(pred - target))
         energy_penalty = torch.abs(pred.sum() - target.sum()) / pred.numel()
-        return self.lambda1 * mae + self.lambda2 * energy_penalty
+        return self.lambda1 * weighted_mae + self.lambda2 * energy_penalty
 
 
 class REDDSpecificDataset(torch.utils.data.Dataset):
@@ -220,9 +231,16 @@ def train_tcn_lnn_on_specific_redd_appliance(data_dict, appliance_name, window_s
 
     # Use appliance power as target instead of aggregate
     # This is the key difference - we're predicting the appliance from the aggregate
-    y_train = train_data[appliance_name].iloc[::5].values.reshape(-1, 1)[:len(X_train)]
+    y_train_raw = train_data[appliance_name].iloc[::5].values.reshape(-1, 1)[:len(X_train)]
     y_val = val_data[appliance_name].iloc[::5].values.reshape(-1, 1)[:len(X_val)]
     y_test = test_data[appliance_name].iloc[::5].values.reshape(-1, 1)[:len(X_test)]
+
+    # Compute class imbalance weight BEFORE normalisation (uses raw watts)
+    on_off_threshold = get_threshold_for_appliance(appliance_name)
+    on_ratio = float((y_train_raw.flatten() > on_off_threshold).mean())
+    on_ratio = max(on_ratio, 1e-6)  # guard against all-zero appliance
+    on_weight = (1.0 - on_ratio) / on_ratio
+    print(f"Class balance for {appliance_name}: {on_ratio*100:.1f}% ON  ->  on_weight = {min(on_weight, 30.0):.1f}x")
 
     # Normalise inputs and targets to [0, 1] — critical for LNN clamp stability
     x_scaler = MinMaxScaler()
@@ -232,9 +250,12 @@ def train_tcn_lnn_on_specific_redd_appliance(data_dict, appliance_name, window_s
     X_val   = x_scaler.transform(X_val.reshape(-1, 1)).reshape(X_val.shape)
     X_test  = x_scaler.transform(X_test.reshape(-1, 1)).reshape(X_test.shape)
 
-    y_train = y_scaler.fit_transform(y_train)
+    y_train = y_scaler.fit_transform(y_train_raw)
     y_val   = y_scaler.transform(y_val)
     y_test  = y_scaler.transform(y_test)
+
+    # Normalised ON threshold (for use inside the loss function)
+    on_threshold_norm = float(y_scaler.transform([[on_off_threshold]])[0][0])
 
     print(f"Training sequences: {X_train.shape} -> {y_train.shape}")
     print(f"Validation sequences: {X_val.shape} -> {y_val.shape}")
@@ -266,8 +287,13 @@ def train_tcn_lnn_on_specific_redd_appliance(data_dict, appliance_name, window_s
 
     model = model.to(device)
 
-    # Combined MAE + energy penalty loss; Adam optimizer
-    criterion = CombinedMAEEnergyLoss(lambda1=1.0, lambda2=lambda_energy)
+    # Weighted MAE + energy penalty loss; Adam optimizer
+    criterion = WeightedMAEEnergyLoss(
+        on_weight=on_weight,
+        on_threshold_norm=on_threshold_norm,
+        lambda1=1.0,
+        lambda2=lambda_energy
+    )
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3)
 
@@ -536,7 +562,9 @@ def train_tcn_lnn_on_specific_redd_appliance(data_dict, appliance_name, window_s
         'appliance': appliance_name,
         'window_size': window_size,
         'improvements': {
-            'loss': 'CombinedMAEEnergyLoss',
+            'loss': 'WeightedMAEEnergyLoss',
+            'on_weight': min(on_weight, 30.0),
+            'on_threshold_norm': on_threshold_norm,
             'lambda1': 1.0,
             'lambda2': lambda_energy,
             'post_processing_threshold_W': post_threshold
@@ -648,8 +676,9 @@ def test_tcn_lnn_on_all_redd_appliances(window_size=100, num_channels=[32, 64, 1
     summary = {
         'timestamp': timestamp,
         'improvements': {
-            'loss': 'CombinedMAEEnergyLoss (MAE + lambda_energy * energy_penalty)',
+            'loss': 'WeightedMAEEnergyLoss (on_weight * MAE_on + MAE_off + lambda_energy * energy_penalty)',
             'lambda_energy': lambda_energy,
+            'on_weight': 'computed per-appliance from training class imbalance, capped at 30x',
             'post_processing': 'Zero predictions below appliance-specific threshold'
         },
         'dataset_splits': {
@@ -699,7 +728,7 @@ def test_tcn_lnn_on_all_redd_appliances(window_size=100, num_channels=[32, 64, 1
 
 if __name__ == "__main__":
     print("Testing TCN-LNN algorithm on REDD dataset with specific splits...")
-    print("Improvements: CombinedMAEEnergyLoss + post-processing threshold")
+    print("Improvements: WeightedMAEEnergyLoss (class-balanced) + energy penalty + post-processing threshold")
 
     # Check if the required pickle files exist
     required_files = [
