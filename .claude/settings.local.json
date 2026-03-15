@@ -1,8 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "WebFetch(domain:www.peeref.com)",
-      "WebFetch(domain:www.ivysci.com)"
+      "Bash(py draw_tcn.py)",
+      "Bash(py draw_lnn.py)",
+      "Bash(py -c \"import ast; ast.parse\\(open\\(''train_tcn_lnn.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''Syntax OK''\\)\")",
+      "Bash(py -c \"import ast; ast.parse\\(open\\(''test_tcn_lnn_redd_specific_splits.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''Syntax OK''\\)\")",
+      "Bash(py draw_transformer_architecture.py)"
     ]
   }
 }
