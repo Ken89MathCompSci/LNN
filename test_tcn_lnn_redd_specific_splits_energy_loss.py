@@ -1,6 +1,7 @@
 import sys
 import os
 import torch
+import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 import json
@@ -20,21 +21,23 @@ from utils import calculate_nilm_metrics, save_model
 
 class WeightedMAEEnergyLoss(torch.nn.Module):
     """
-    Loss = lambda1 * weighted_MAE + lambda2 * |sum(pred) - sum(target)| / N
+    Loss = lambda1 * weighted_MAE
+         + lambda2 * |sum(pred) - sum(target)| / N   (energy penalty -> SAE)
+         + alpha_bce * BCE(pred, binary_target)       (classification -> F1)
 
-    weighted_MAE applies `on_weight` to samples where target > on_threshold_norm
-    and 1.0 to OFF samples.  This prevents the model collapsing to predict-zero
-    on heavily imbalanced appliances (e.g. dish washer ON only 4% of the time).
-
+    weighted_MAE: on_weight applied to ON samples, 1.0 to OFF samples.
+    BCE term: treats the [0,1] regression output as a soft probability for the
+              ON/OFF state, directly optimising the classification boundary for F1.
     on_weight is capped at 30x to avoid gradient instability.
-    Both terms operate in normalised [0,1] space during training.
+    All terms operate in normalised [0,1] space during training.
     """
-    def __init__(self, on_weight, on_threshold_norm, lambda1=1.0, lambda2=0.1):
+    def __init__(self, on_weight, on_threshold_norm, lambda1=1.0, lambda2=0.1, alpha_bce=0.5):
         super().__init__()
         self.on_weight = min(float(on_weight), 30.0)
         self.on_threshold_norm = float(on_threshold_norm)
         self.lambda1 = lambda1
         self.lambda2 = lambda2
+        self.alpha_bce = alpha_bce
 
     def forward(self, pred, target):
         weights = torch.where(
@@ -44,7 +47,11 @@ class WeightedMAEEnergyLoss(torch.nn.Module):
         )
         weighted_mae = torch.mean(weights * torch.abs(pred - target))
         energy_penalty = torch.abs(pred.sum() - target.sum()) / pred.numel()
-        return self.lambda1 * weighted_mae + self.lambda2 * energy_penalty
+
+        binary_target = (target > self.on_threshold_norm).float()
+        bce = F.binary_cross_entropy(pred.clamp(1e-7, 1 - 1e-7), binary_target)
+
+        return self.lambda1 * weighted_mae + self.lambda2 * energy_penalty + self.alpha_bce * bce
 
 
 class REDDSpecificDataset(torch.utils.data.Dataset):
@@ -182,7 +189,7 @@ def train_tcn_lnn_on_specific_redd_appliance(data_dict, appliance_name, window_s
                                            num_channels=[32, 64, 128], kernel_size=3, dropout=0.2,
                                            hidden_size=64, dt=0.1,
                                            epochs=20, lr=0.001, patience=5,
-                                           lambda_energy=0.1,
+                                           lambda_energy=0.1, alpha_bce=0.5,
                                            save_dir='models/tcn_lnn_redd_specific'):
     """
     Train TCN model on a specific REDD appliance with the exact splits you specified.
@@ -287,12 +294,13 @@ def train_tcn_lnn_on_specific_redd_appliance(data_dict, appliance_name, window_s
 
     model = model.to(device)
 
-    # Weighted MAE + energy penalty loss; Adam optimizer
+    # Weighted MAE + energy penalty + BCE loss; Adam optimizer
     criterion = WeightedMAEEnergyLoss(
         on_weight=on_weight,
         on_threshold_norm=on_threshold_norm,
         lambda1=1.0,
-        lambda2=lambda_energy
+        lambda2=lambda_energy,
+        alpha_bce=alpha_bce
     )
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3)
@@ -567,6 +575,7 @@ def train_tcn_lnn_on_specific_redd_appliance(data_dict, appliance_name, window_s
             'on_threshold_norm': on_threshold_norm,
             'lambda1': 1.0,
             'lambda2': lambda_energy,
+            'alpha_bce': alpha_bce,
             'post_processing_threshold_W': post_threshold
         },
         'model_params': {
@@ -597,7 +606,8 @@ def train_tcn_lnn_on_specific_redd_appliance(data_dict, appliance_name, window_s
 
 def test_tcn_lnn_on_all_redd_appliances(window_size=100, num_channels=[32, 64, 128], kernel_size=3,
                                        dropout=0.2, hidden_size=64, dt=0.1,
-                                       epochs=80, lr=0.001, patience=20, lambda_energy=0.1):
+                                       epochs=80, lr=0.001, patience=20,
+                                       lambda_energy=0.1, alpha_bce=0.5):
     """
     Test TCN model on all specified REDD appliances with the exact splits you mentioned.
     Uses CombinedMAEEnergyLoss and post-processing thresholding.
@@ -653,6 +663,7 @@ def test_tcn_lnn_on_all_redd_appliances(window_size=100, num_channels=[32, 64, 1
                 lr=lr,
                 patience=patience,
                 lambda_energy=lambda_energy,
+                alpha_bce=alpha_bce,
                 save_dir=appliance_dir
             )
 
@@ -676,8 +687,9 @@ def test_tcn_lnn_on_all_redd_appliances(window_size=100, num_channels=[32, 64, 1
     summary = {
         'timestamp': timestamp,
         'improvements': {
-            'loss': 'WeightedMAEEnergyLoss (on_weight * MAE_on + MAE_off + lambda_energy * energy_penalty)',
+            'loss': 'WeightedMAEEnergyLoss (on_weight*MAE_on + MAE_off + lambda_energy*energy_penalty + alpha_bce*BCE)',
             'lambda_energy': lambda_energy,
+            'alpha_bce': alpha_bce,
             'on_weight': 'computed per-appliance from training class imbalance, capped at 30x',
             'post_processing': 'Zero predictions below appliance-specific threshold'
         },
@@ -728,7 +740,7 @@ def test_tcn_lnn_on_all_redd_appliances(window_size=100, num_channels=[32, 64, 1
 
 if __name__ == "__main__":
     print("Testing TCN-LNN algorithm on REDD dataset with specific splits...")
-    print("Improvements: WeightedMAEEnergyLoss (class-balanced) + energy penalty + post-processing threshold")
+    print("Improvements: WeightedMAEEnergyLoss (class-balanced) + energy penalty + BCE (F1) + post-processing threshold")
 
     # Check if the required pickle files exist
     required_files = [
@@ -755,7 +767,8 @@ if __name__ == "__main__":
         epochs=80,
         lr=0.001,
         patience=20,
-        lambda_energy=0.1
+        lambda_energy=0.1,
+        alpha_bce=0.5
     )
 
     # Print summary
