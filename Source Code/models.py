@@ -996,6 +996,83 @@ class TCNLiquidNetworkModel(nn.Module):
         return self.fc(h)
 
 
+class TCNAdvancedLiquidNetworkModelTwo(nn.Module):
+    """
+    TCN Encoder + AdvancedLiquidNetworkModelTwo for NILM.
+
+    Architecture:
+        Input -> TCN Blocks (dilated conv, feature extraction) -> Linear projection
+              -> 2x AdvancedLiquidTimeLayer (adaptive tau, input gate,
+                 inter-layer + intra-layer LayerNorm) -> FC -> Output
+    """
+    def __init__(self, input_size, hidden_size, output_size, dt=0.1,
+                 num_channels=None, kernel_size=3, dropout=0.2, num_layers=2):
+        super(TCNAdvancedLiquidNetworkModelTwo, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+
+        if num_channels is None:
+            num_channels = [32, 64, 128]
+
+        # TCN Encoder: stack of dilated TCNBlocks
+        tcn_layers = []
+        in_ch = input_size
+        for i, out_ch in enumerate(num_channels):
+            dilation = 2 ** i
+            tcn_layers.append(TCNBlock(in_ch, out_ch, kernel_size, dilation, dropout))
+            in_ch = out_ch
+        self.tcn_encoder = nn.Sequential(*tcn_layers)
+
+        # Project TCN output channels to hidden_size
+        self.encoder_projection = nn.Linear(num_channels[-1], hidden_size)
+
+        # Stacked AdvancedLiquidTimeLayer (same as AdvancedLiquidNetworkModelTwo)
+        self.liquid_layers = nn.ModuleList([
+            AdvancedLiquidTimeLayer(
+                hidden_size if i == 0 else hidden_size,
+                hidden_size,
+                dt
+            ) for i in range(num_layers)
+        ])
+
+        # Inter-layer LayerNorm: normalises hidden state crossing layer boundaries
+        self.layer_norms = nn.ModuleList([
+            nn.LayerNorm(hidden_size) for _ in range(num_layers)
+        ])
+
+        # Intra-layer LayerNorm: normalises h_{t-1} before each timestep recurrence
+        self.intra_norms = nn.ModuleList([
+            nn.LayerNorm(hidden_size) for _ in range(num_layers)
+        ])
+
+        self.fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        batch_size, seq_len, _ = x.size()
+
+        # TCN expects (batch_size, channels, seq_len)
+        x = x.transpose(1, 2)
+        x = self.tcn_encoder(x)               # (batch_size, num_channels[-1], seq_len)
+        x = x.transpose(1, 2)                 # (batch_size, seq_len, num_channels[-1])
+
+        # Project to hidden size
+        x = self.encoder_projection(x)        # (batch_size, seq_len, hidden_size)
+
+        # Step through stacked advanced LNN layers
+        hidden_states = [None] * self.num_layers
+
+        for t in range(seq_len):
+            x_t = x[:, t, :]
+
+            for i in range(self.num_layers):
+                inp = x_t if i == 0 else self.layer_norms[i - 1](hidden_states[i - 1])
+                h_prev = (self.intra_norms[i](hidden_states[i])
+                          if hidden_states[i] is not None else None)
+                hidden_states[i] = self.liquid_layers[i](inp, h_prev)
+
+        return self.fc(self.layer_norms[-1](hidden_states[-1]))
+
+
 class TransformerEncoderLiquidNetworkModel(nn.Module):
     """
     Transformer Encoder + Liquid Neural Network for NILM.
