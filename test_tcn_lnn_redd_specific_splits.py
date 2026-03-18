@@ -82,36 +82,32 @@ def load_redd_specific_splits():
         'appliances': appliances
     }
 
-def create_sequences(data, window_size=100, target_size=1):
+def create_sequences(data, appliance_name, window_size=100):
     """
-    Create sequences for sequence-to-point prediction
-    
+    Create sequences for sequence-to-point prediction.
+    Input X is the aggregate (main), target y is the appliance power
+    at the midpoint of each window.
+
     Args:
         data: DataFrame with 'main' and appliance columns
+        appliance_name: Column name of the target appliance
         window_size: Size of input window
-        target_size: Size of target (1 for sequence-to-point)
-    
+
     Returns:
         X: Input sequences (n_samples, window_size, 1)
-        y: Target values (n_samples, target_size)
+        y: Target values (n_samples, 1)
     """
     mains = data['main'].values
+    appliance = data[appliance_name].values
     X, y = [], []
-    
-    # Use stride to reduce correlation between samples
+
     stride = 5
-    
-    for i in range(0, len(mains) - window_size - target_size + 1, stride):
+
+    for i in range(0, len(mains) - window_size + 1, stride):
         X.append(mains[i:i+window_size])
-        
-        if target_size == 1:
-            # Sequence-to-point: predict the middle point
-            midpoint = i + window_size // 2
-            y.append(mains[midpoint:midpoint+1])
-        else:
-            # Sequence-to-sequence
-            y.append(mains[i+window_size:i+window_size+target_size])
-    
+        midpoint = i + window_size // 2
+        y.append([appliance[midpoint]])
+
     return np.array(X).reshape(-1, window_size, 1), np.array(y)
 
 def get_threshold_for_appliance(appliance_name):
@@ -166,17 +162,10 @@ def train_tcn_lnn_on_specific_redd_appliance(data_dict, appliance_name, window_s
     
     # Create sequences for each split
     print(f"Creating sequences for {appliance_name}...")
-    
-    # For NILM, we use aggregate as input and appliance as target
-    X_train, y_train = create_sequences(train_data, window_size=window_size, target_size=1)
-    X_val, y_val = create_sequences(val_data, window_size=window_size, target_size=1)
-    X_test, y_test = create_sequences(test_data, window_size=window_size, target_size=1)
-    
-    # Use appliance power as target instead of aggregate
-    # This is the key difference - we're predicting the appliance from the aggregate
-    y_train = train_data[appliance_name].iloc[::5].values.reshape(-1, 1)[:len(X_train)]
-    y_val = val_data[appliance_name].iloc[::5].values.reshape(-1, 1)[:len(X_val)]
-    y_test = test_data[appliance_name].iloc[::5].values.reshape(-1, 1)[:len(X_test)]
+
+    X_train, y_train = create_sequences(train_data, appliance_name, window_size=window_size)
+    X_val, y_val     = create_sequences(val_data,   appliance_name, window_size=window_size)
+    X_test, y_test   = create_sequences(test_data,  appliance_name, window_size=window_size)
 
     # Normalise inputs and targets to [0, 1] — critical for LNN clamp stability
     x_scaler = MinMaxScaler()
