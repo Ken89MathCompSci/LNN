@@ -11,7 +11,8 @@
       "Bash(conda run python draw_lnn_cell.py)",
       "Bash(/c/Users/Admin/anaconda3/python.exe draw_lnn_cell.py)",
       "Bash(python -c \":*)",
-      "Bash(py -c \":*)"
+      "Bash(py -c \":*)",
+      "Bash(py preprocess_ukdale_splits.py)"
     ]
   }
 }
