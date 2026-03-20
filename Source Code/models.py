@@ -1776,3 +1776,157 @@ class HybridTransformerSSMModel(nn.Module):
         # 5. Concat → dropout → FC
         h_cat = torch.cat([fwd_pool, bwd_pool], dim=1)       # (B, H*2)
         return self.fc(self.dropout(h_cat))
+
+
+# ---------------------------------------------------------------------------
+# GNN + LNN
+# ---------------------------------------------------------------------------
+
+class GCNLayer(nn.Module):
+    """
+    Single Graph Convolutional Network layer.
+
+    Computes:  out = ReLU( A_hat * X * W )
+    where A_hat is the pre-normalised adjacency matrix.
+
+    Args:
+        in_features:  input feature dimension per node
+        out_features: output feature dimension per node
+    """
+    def __init__(self, in_features, out_features):
+        super(GCNLayer, self).__init__()
+        self.linear = nn.Linear(in_features, out_features)
+
+    def forward(self, x, adj):
+        """
+        Args:
+            x:   (batch, num_nodes, in_features)
+            adj: (num_nodes, num_nodes)  pre-normalised, on same device as x
+
+        Returns:
+            (batch, num_nodes, out_features)
+        """
+        adj_exp = adj.unsqueeze(0).expand(x.size(0), -1, -1)   # (B, N, N)
+        agg = torch.bmm(adj_exp, x)                             # (B, N, in_features)
+        return F.relu(self.linear(agg))                         # (B, N, out_features)
+
+
+class GNNLiquidNetworkModel(nn.Module):
+    """
+    Graph Neural Network + Liquid Neural Network for multi-appliance NILM.
+
+    Architecture:
+        1. TCN encoder  : aggregate window → per-timestep features (B, T, tcn_out)
+        2. Node init    : broadcast aggregate feature + learnable node embeddings
+                          → (B, N, tcn_out)  where N = num_appliances
+        3. GCN layers   : relational message passing across appliance nodes
+                          → (B, N, hidden)
+        4. LNN cell     : Liquid ODE step per node, using GCN output as input
+        5. Output FC    : hidden state of each node → appliance power
+                          → (B, N)  (all appliances predicted simultaneously)
+
+    The adjacency matrix encodes co-activation correlations between appliances
+    and is computed from training data (passed as adj_matrix at construction).
+
+    Args:
+        input_size:    feature dim of each input timestep (1 for scalar power)
+        hidden_size:   hidden dimension for GCN and LNN
+        num_nodes:     number of appliance nodes (default 4)
+        num_channels:  TCN channel list, e.g. [32, 64, 128]
+        kernel_size:   TCN kernel size
+        dropout:       TCN dropout
+        dt:            LNN Euler integration step
+        num_gcn_layers: number of stacked GCN layers
+        adj_matrix:    (num_nodes, num_nodes) numpy array — normalised adjacency;
+                       if None, defaults to a uniform fully-connected graph
+    """
+    def __init__(self, input_size, hidden_size, num_nodes=4,
+                 num_channels=None, kernel_size=3, dropout=0.2,
+                 dt=0.1, num_gcn_layers=2, adj_matrix=None):
+        super(GNNLiquidNetworkModel, self).__init__()
+
+        if num_channels is None:
+            num_channels = [32, 64, 128]
+
+        self.num_nodes   = num_nodes
+        self.hidden_size = hidden_size
+        self.dt          = dt
+        tcn_out          = num_channels[-1]
+
+        # --- TCN encoder (keep sequence dimension) ---
+        tcn_layers = []
+        for i in range(len(num_channels)):
+            dilation  = 2 ** i
+            in_ch     = input_size if i == 0 else num_channels[i - 1]
+            out_ch    = num_channels[i]
+            tcn_layers.append(TCNBlock(in_ch, out_ch, kernel_size, dilation, dropout))
+        self.tcn = nn.Sequential(*tcn_layers)
+
+        # --- Learnable node embeddings (one per appliance) ---
+        self.node_embed = nn.Parameter(torch.randn(num_nodes, tcn_out) * 0.01)
+
+        # --- GCN layers ---
+        gcn_in = tcn_out
+        self.gcn_layers = nn.ModuleList()
+        self.gcn_norms  = nn.ModuleList()
+        for i in range(num_gcn_layers):
+            self.gcn_layers.append(GCNLayer(gcn_in, hidden_size))
+            self.gcn_norms.append(nn.LayerNorm(hidden_size))
+            gcn_in = hidden_size
+
+        # --- Shared LiquidODECell across nodes ---
+        self.lnn_cell  = LiquidODECell(hidden_size, hidden_size, dt)
+        self.lnn_norm  = nn.LayerNorm(hidden_size)
+
+        # --- Output: one scalar per node ---
+        self.fc = nn.Linear(hidden_size, 1)
+
+        # --- Adjacency matrix (fixed, registered as buffer) ---
+        if adj_matrix is not None:
+            adj_tensor = torch.FloatTensor(adj_matrix)
+        else:
+            # Uniform fully-connected (including self-loops), row-normalised
+            adj_tensor = torch.ones(num_nodes, num_nodes) / num_nodes
+        self.register_buffer('adj', adj_tensor)
+
+    def forward(self, x):
+        """
+        Args:
+            x: (batch, seq_len, 1)  — normalised aggregate power window
+
+        Returns:
+            out: (batch, num_nodes) — predicted power for each appliance
+        """
+        batch_size, seq_len, _ = x.size()
+
+        # 1. TCN encode — keep sequence
+        x_tcn = x.permute(0, 2, 1)          # (B, 1, T)
+        x_tcn = self.tcn(x_tcn)             # (B, tcn_out, T)
+        x_tcn = x_tcn.permute(0, 2, 1)      # (B, T, tcn_out)
+
+        # 2. Initialise per-node hidden states
+        hidden = [torch.zeros(batch_size, self.hidden_size, device=x.device)
+                  for _ in range(self.num_nodes)]
+
+        # 3. Step through time
+        for t in range(seq_len):
+            x_t = x_tcn[:, t, :]            # (B, tcn_out)
+
+            # Build node features: broadcast aggregate + node embedding
+            node_feats = (x_t.unsqueeze(1)                     # (B, 1, tcn_out)
+                          + self.node_embed.unsqueeze(0))       # (B, N, tcn_out)
+
+            # GCN message passing
+            for gcn, norm in zip(self.gcn_layers, self.gcn_norms):
+                node_feats = norm(gcn(node_feats, self.adj))    # (B, N, hidden)
+
+            # LNN update per node (shared cell weights)
+            for n in range(self.num_nodes):
+                h_prev = self.lnn_norm(hidden[n])               # normalise hidden
+                hidden[n] = self.lnn_cell(node_feats[:, n, :], h_prev)
+
+        # 4. Stack final hidden states and project to output
+        hidden_stack = torch.stack(hidden, dim=1)               # (B, N, hidden)
+        out = self.fc(hidden_stack).squeeze(-1)                 # (B, N)
+
+        return out
