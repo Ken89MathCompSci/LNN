@@ -225,7 +225,8 @@ def train_tcn_lnn_on_appliance(data_dict, appliance_name, window_size=100,
 
         print(f"Epoch {epoch+1}/{epochs}, Train Loss: {avg_train_loss:.6f}, "
               f"Val Loss: {avg_val_loss:.6f}, Val MAE: {metrics['mae']:.2f}, "
-              f"Val SAE: {metrics['sae']:.2f}, Val F1: {metrics['f1']:.4f}")
+              f"Val SAE: {metrics['sae']:.2f}, Val F1: {metrics['f1']:.4f}, "
+              f"Val Precision: {metrics['precision']:.4f}, Val Recall: {metrics['recall']:.4f}")
 
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
@@ -270,25 +271,33 @@ def train_tcn_lnn_on_appliance(data_dict, appliance_name, window_size=100,
     threshold = get_threshold_for_appliance(appliance_name)
     test_metrics = calculate_nilm_metrics(all_test_targets, all_test_outputs, threshold=threshold)
 
-    val_mae_series = [m['mae'] for m in history['val_metrics']]
-    val_sae_series = [m['sae'] for m in history['val_metrics']]
-    val_f1_series  = [m['f1']  for m in history['val_metrics']]
+    val_mae_series       = [m['mae']       for m in history['val_metrics']]
+    val_sae_series       = [m['sae']       for m in history['val_metrics']]
+    val_f1_series        = [m['f1']        for m in history['val_metrics']]
+    val_precision_series = [m['precision'] for m in history['val_metrics']]
+    val_recall_series    = [m['recall']    for m in history['val_metrics']]
 
     aggregates = {
-        'train_loss_mean': float(np.mean(history['train_loss'])),
-        'train_loss_var':  float(np.var(history['train_loss'])),
-        'val_loss_mean':   float(np.mean(history['val_loss'])),
-        'val_loss_var':    float(np.var(history['val_loss'])),
-        'val_mae_mean':    float(np.mean(val_mae_series)),
-        'val_mae_var':     float(np.var(val_mae_series)),
-        'val_sae_mean':    float(np.mean(val_sae_series)),
-        'val_sae_var':     float(np.var(val_sae_series)),
-        'val_f1_mean':     float(np.mean(val_f1_series)),
-        'val_f1_var':      float(np.var(val_f1_series)),
-        'test_mae':        float(test_metrics['mae']),
-        'test_sae':        float(test_metrics['sae']),
-        'test_f1':         float(test_metrics['f1']),
-        'test_loss':       float(avg_test_loss)
+        'train_loss_mean':      float(np.mean(history['train_loss'])),
+        'train_loss_var':       float(np.var(history['train_loss'])),
+        'val_loss_mean':        float(np.mean(history['val_loss'])),
+        'val_loss_var':         float(np.var(history['val_loss'])),
+        'val_mae_mean':         float(np.mean(val_mae_series)),
+        'val_mae_var':          float(np.var(val_mae_series)),
+        'val_sae_mean':         float(np.mean(val_sae_series)),
+        'val_sae_var':          float(np.var(val_sae_series)),
+        'val_f1_mean':          float(np.mean(val_f1_series)),
+        'val_f1_var':           float(np.var(val_f1_series)),
+        'val_precision_mean':   float(np.mean(val_precision_series)),
+        'val_precision_var':    float(np.var(val_precision_series)),
+        'val_recall_mean':      float(np.mean(val_recall_series)),
+        'val_recall_var':       float(np.var(val_recall_series)),
+        'test_mae':             float(test_metrics['mae']),
+        'test_sae':             float(test_metrics['sae']),
+        'test_f1':              float(test_metrics['f1']),
+        'test_precision':       float(test_metrics['precision']),
+        'test_recall':          float(test_metrics['recall']),
+        'test_loss':            float(avg_test_loss)
     }
 
     print(f"Test Loss: {avg_test_loss:.6f}")
@@ -462,6 +471,8 @@ if __name__ == "__main__":
     print(f"Total appliances tested: {len(results)}")
     for appliance, result in results.items():
         print(f"  {appliance}:")
-        print(f"    Test MAE: {result['final_metrics']['mae']:.4f}")
-        print(f"    Test SAE: {result['final_metrics']['sae']:.4f}")
-        print(f"    Test F1:  {result['final_metrics']['f1']:.4f}")
+        print(f"    Test MAE:       {result['final_metrics']['mae']:.4f}")
+        print(f"    Test SAE:       {result['final_metrics']['sae']:.4f}")
+        print(f"    Test F1:        {result['final_metrics']['f1']:.4f}")
+        print(f"    Test Precision: {result['final_metrics']['precision']:.4f}")
+        print(f"    Test Recall:    {result['final_metrics']['recall']:.4f}")

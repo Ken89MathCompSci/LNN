@@ -81,22 +81,26 @@ def save_pkl(df, path):
 if __name__ == '__main__':
     os.makedirs(OUT_DIR, exist_ok=True)
 
-    # Train: first 24h of House 1
-    print("\nExtracting TRAIN (House 1, first 24h)...")
-    train_df = load_window(HOUSE1_CSV, HOUSE1_COL_MAP, skiprows=0)
+    # Row offsets pre-calculated from House 1 start (2013-03-17 19:12:42) at 6s resolution
+    # train 2014-11-09: (2014-11-09 - 2013-03-17 19:12:42) / 6s = 8657273
+    # val   2014-12-07: (2014-12-07 - 2013-03-17 19:12:42) / 6s = 9060473
+
+    # Train: House 1, 2014-11-09
+    print("\nExtracting TRAIN (House 1, 2014-11-09)...")
+    train_df = load_window(HOUSE1_CSV, HOUSE1_COL_MAP, skiprows=8657273)
     save_pkl(train_df, f'{OUT_DIR}/train_small.pkl')
 
-    # Val: House 1 starting ~1 month after train end
-    print("\nFinding VAL start row (House 1, ~2013-04-17)...")
-    val_start_idx = find_row_for_date(HOUSE1_CSV, '2013-04-17')
-    print(f"  Val start row: {val_start_idx}")
-    print("\nExtracting VAL...")
-    val_df = load_window(HOUSE1_CSV, HOUSE1_COL_MAP, skiprows=val_start_idx)
+    # Val: House 1, 2014-12-07
+    print("\nExtracting VAL (House 1, 2014-12-07)...")
+    val_df = load_window(HOUSE1_CSV, HOUSE1_COL_MAP, skiprows=9060473)
     save_pkl(val_df, f'{OUT_DIR}/val_small.pkl')
 
-    # Test: first 24h of House 5
-    print("\nExtracting TEST (House 5, first 24h)...")
-    test_df = load_window(HOUSE5_CSV, HOUSE5_COL_MAP, skiprows=0)
+    # Test: House 5, 2014-08-24
+    print("\nFinding TEST start row (House 5, 2014-08-24)...")
+    test_start_idx = find_row_for_date(HOUSE5_CSV, '2014-08-24')
+    print(f"  Test start row: {test_start_idx}")
+    print("\nExtracting TEST...")
+    test_df = load_window(HOUSE5_CSV, HOUSE5_COL_MAP, skiprows=test_start_idx)
     save_pkl(test_df, f'{OUT_DIR}/test_small.pkl')
 
     # --- Verify ---
