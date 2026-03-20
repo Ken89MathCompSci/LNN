@@ -1073,6 +1073,143 @@ class TCNAdvancedLiquidNetworkModelTwo(nn.Module):
         return self.fc(self.layer_norms[-1](hidden_states[-1]))
 
 
+class LSTMLiquidNetworkModel(nn.Module):
+    """
+    Bidirectional LSTM Encoder + Liquid Neural Network for NILM.
+
+    Architecture:
+        Input -> BiLSTM (variable-length dependency extraction)
+              -> Linear projection -> LiquidODECell (ODE recurrence) -> FC -> Output
+
+    Unlike TCN's fixed receptive field, LSTM captures variable-length dependencies
+    from both directions. The LNN then refines the temporal dynamics with its
+    continuous-time ODE recurrence.
+
+    Args:
+        input_size:    feature dim per timestep (1 for scalar power)
+        lstm_hidden:   hidden size of the LSTM (each direction)
+        hidden_size:   hidden size for the LNN and projection
+        output_size:   number of outputs (1 for single appliance)
+        num_lstm_layers: number of stacked LSTM layers
+        dropout:       dropout between LSTM layers (only applied if num_lstm_layers > 1)
+        dt:            LNN Euler integration step
+    """
+    def __init__(self, input_size, hidden_size, output_size,
+                 lstm_hidden=64, num_lstm_layers=2, dropout=0.2, dt=0.1):
+        super(LSTMLiquidNetworkModel, self).__init__()
+        self.hidden_size = hidden_size
+        self.dt = dt
+
+        # Bidirectional LSTM encoder
+        self.lstm = nn.LSTM(
+            input_size=input_size,
+            hidden_size=lstm_hidden,
+            num_layers=num_lstm_layers,
+            batch_first=True,
+            bidirectional=True,
+            dropout=dropout if num_lstm_layers > 1 else 0.0
+        )
+
+        # Project BiLSTM output (lstm_hidden * 2) to hidden_size for LNN
+        self.encoder_projection = nn.Linear(lstm_hidden * 2, hidden_size)
+
+        # LiquidODECell
+        self.liquid = LiquidODECell(hidden_size, hidden_size, dt=dt)
+
+        # Output layer
+        self.fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        """
+        Args:
+            x: (batch_size, seq_len, input_size)
+        Returns:
+            (batch_size, output_size)
+        """
+        batch_size, seq_len, _ = x.size()
+
+        # BiLSTM encode: (batch, seq_len, lstm_hidden * 2)
+        lstm_out, _ = self.lstm(x)
+
+        # Project to hidden_size: (batch, seq_len, hidden_size)
+        x = self.encoder_projection(lstm_out)
+
+        # Step through LNN ODE cell
+        h = torch.zeros(batch_size, self.hidden_size, device=x.device)
+        for t in range(seq_len):
+            h = self.liquid(x[:, t, :], h)
+
+        return self.fc(h)
+
+
+class GRULiquidNetworkModel(nn.Module):
+    """
+    Bidirectional GRU Encoder + Liquid Neural Network for NILM.
+
+    Architecture:
+        Input -> BiGRU (variable-length dependency extraction)
+              -> Linear projection -> LiquidODECell (ODE recurrence) -> FC -> Output
+
+    GRU is lighter than LSTM (no separate cell state) while still capturing
+    variable-length context from both directions before the LNN refines dynamics.
+
+    Args:
+        input_size:    feature dim per timestep (1 for scalar power)
+        gru_hidden:    hidden size of the GRU (each direction)
+        hidden_size:   hidden size for the LNN and projection
+        output_size:   number of outputs (1 for single appliance)
+        num_gru_layers: number of stacked GRU layers
+        dropout:       dropout between GRU layers (only applied if num_gru_layers > 1)
+        dt:            LNN Euler integration step
+    """
+    def __init__(self, input_size, hidden_size, output_size,
+                 gru_hidden=64, num_gru_layers=2, dropout=0.2, dt=0.1):
+        super(GRULiquidNetworkModel, self).__init__()
+        self.hidden_size = hidden_size
+        self.dt = dt
+
+        # Bidirectional GRU encoder
+        self.gru = nn.GRU(
+            input_size=input_size,
+            hidden_size=gru_hidden,
+            num_layers=num_gru_layers,
+            batch_first=True,
+            bidirectional=True,
+            dropout=dropout if num_gru_layers > 1 else 0.0
+        )
+
+        # Project BiGRU output (gru_hidden * 2) to hidden_size for LNN
+        self.encoder_projection = nn.Linear(gru_hidden * 2, hidden_size)
+
+        # LiquidODECell
+        self.liquid = LiquidODECell(hidden_size, hidden_size, dt=dt)
+
+        # Output layer
+        self.fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        """
+        Args:
+            x: (batch_size, seq_len, input_size)
+        Returns:
+            (batch_size, output_size)
+        """
+        batch_size, seq_len, _ = x.size()
+
+        # BiGRU encode: (batch, seq_len, gru_hidden * 2)
+        gru_out, _ = self.gru(x)
+
+        # Project to hidden_size: (batch, seq_len, hidden_size)
+        x = self.encoder_projection(gru_out)
+
+        # Step through LNN ODE cell
+        h = torch.zeros(batch_size, self.hidden_size, device=x.device)
+        for t in range(seq_len):
+            h = self.liquid(x[:, t, :], h)
+
+        return self.fc(h)
+
+
 class TransformerEncoderLiquidNetworkModel(nn.Module):
     """
     Transformer Encoder + Liquid Neural Network for NILM.

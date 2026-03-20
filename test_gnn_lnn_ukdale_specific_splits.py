@@ -251,18 +251,19 @@ def train_gnn_lnn(data_dict, window_size=100,
 
         # Print summary line
         avg_mae = np.mean([epoch_metrics[a]['mae']       for a in APPLIANCES])
+        avg_sae = np.mean([epoch_metrics[a]['sae']       for a in APPLIANCES])
         avg_f1  = np.mean([epoch_metrics[a]['f1']        for a in APPLIANCES])
         avg_pre = np.mean([epoch_metrics[a]['precision'] for a in APPLIANCES])
         avg_rec = np.mean([epoch_metrics[a]['recall']    for a in APPLIANCES])
         print(f"Epoch {epoch+1}/{epochs}, "
               f"Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}, "
-              f"Avg MAE: {avg_mae:.2f}, Avg F1: {avg_f1:.4f}, "
+              f"Avg MAE: {avg_mae:.2f}, Avg SAE: {avg_sae:.2f}, Avg F1: {avg_f1:.4f}, "
               f"Avg Precision: {avg_pre:.4f}, Avg Recall: {avg_rec:.4f}")
 
         # Per-appliance detail
         for app in APPLIANCES:
             m = epoch_metrics[app]
-            print(f"  {app:15s}: MAE={m['mae']:.2f}  F1={m['f1']:.4f}  "
+            print(f"  {app:15s}: MAE={m['mae']:.2f}  SAE={m['sae']:.2f}  F1={m['f1']:.4f}  "
                   f"Prec={m['precision']:.4f}  Rec={m['recall']:.4f}")
 
         # Early stopping / save
@@ -336,8 +337,8 @@ def train_gnn_lnn(data_dict, window_size=100,
     print("\nTest Metrics per appliance:")
     for app in APPLIANCES:
         m = test_metrics[app]
-        print(f"  {app:15s}: MAE={m['mae']:.2f}  SAE={m['sae']:.2f}  "
-              f"F1={m['f1']:.4f}  Prec={m['precision']:.4f}  Rec={m['recall']:.4f}")
+        print(f"  {app:15s}: MAE={m['mae']:.2f}  SAE={m['sae']:.2f}  F1={m['f1']:.4f}  "
+              f"Prec={m['precision']:.4f}  Rec={m['recall']:.4f}")
     print("\nAggregates (mean/variance over epochs):")
     print(json.dumps(aggregates, indent=2))
 
@@ -442,5 +443,5 @@ if __name__ == "__main__":
     print(f"\nSummary — GNN-LNN on UKDALE:")
     for app in APPLIANCES:
         m = test_metrics[app]
-        print(f"  {app:15s}: MAE={m['mae']:.4f}  SAE={m['sae']:.4f}  "
-              f"F1={m['f1']:.4f}  Precision={m['precision']:.4f}  Recall={m['recall']:.4f}")
+        print(f"  {app:15s}: MAE={m['mae']:.4f}  SAE={m['sae']:.4f}  F1={m['f1']:.4f}  "
+              f"Precision={m['precision']:.4f}  Recall={m['recall']:.4f}")
