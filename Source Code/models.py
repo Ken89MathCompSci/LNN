@@ -2075,20 +2075,27 @@ class GRUGNNLiquidNetworkModel(nn.Module):
 
     Architecture:
         GRU branch  : BiGRU → Linear projection → LiquidODECell (step-by-step)
-                      → h_t ∈ (B, hidden)   [global temporal embedding]
+                      → h_t ∈ (B, hidden)  [global temporal embedding]
+                      → node_gru_proj: Linear(hidden → hidden*N)
+                      → h_t[n] ∈ (B, hidden) per node  [per-node temporal view]
 
         GNN branch  : TCN encoder → per-node init → GCN layers → LiquidODECell per node
-                      → r_t ∈ (B, N, hidden) [per-appliance relational embedding]
+                      → r_t[n] ∈ (B, hidden) [per-appliance relational embedding]
 
-        Gate (per node, shared weights):
-            g_t[n] = σ( W_g · [h_t ; r_t[n]] + b_g )
+        Gate (shared weights, operates per node):
+            g_t[n] = σ( W_g · [h_t[n] ; r_t[n]] + b_g )
             W_g ∈ ℝ^{hidden × 2·hidden},  g_t[n] ∈ (0,1)^hidden
 
         Convex mix:
-            z_t[n] = g_t[n] ⊙ h_t  +  (1 − g_t[n]) ⊙ r_t[n]
+            z_t[n] = g_t[n] ⊙ h_t[n]  +  (1 − g_t[n]) ⊙ r_t[n]
 
         Decoder:
             out[n] = FC( z_t[n] )  →  appliance power scalar
+
+    The per-node projection node_gru_proj gives the gate a distinct temporal
+    representation per appliance, allowing it to learn which branch to trust
+    differently for each load type (e.g. g→1 for fast spikes, g→0 for
+    appliances with strong co-activation patterns).
 
     The gate is interpretable: after training, its mean value per appliance
     indicates whether the model relied more on temporal (g→1) or relational (g→0)
@@ -2131,8 +2138,10 @@ class GRUGNNLiquidNetworkModel(nn.Module):
             bidirectional=True,
             dropout=dropout if num_gru_layers > 1 else 0.0
         )
-        self.gru_proj  = nn.Linear(gru_hidden * 2, hidden_size)
-        self.gru_lnn   = LiquidODECell(hidden_size, hidden_size, dt=dt)
+        self.gru_proj      = nn.Linear(gru_hidden * 2, hidden_size)
+        self.gru_lnn       = LiquidODECell(hidden_size, hidden_size, dt=dt)
+        # Project shared temporal embedding to N distinct per-node views
+        self.node_gru_proj = nn.Linear(hidden_size, hidden_size * num_nodes)
 
         # ── GNN branch ──────────────────────────────────────────────────────
         tcn_layers = []
@@ -2188,7 +2197,10 @@ class GRUGNNLiquidNetworkModel(nn.Module):
         h_gru = torch.zeros(batch_size, self.hidden_size, device=x.device)
         for t in range(seq_len):
             h_gru = self.gru_lnn(gru_proj[:, t, :], h_gru)
-        # h_gru: (B, hidden) — final temporal embedding
+        # h_gru: (B, hidden) — global temporal embedding
+        # Project to per-node temporal views so the gate can differentiate
+        h_nodes = self.node_gru_proj(h_gru).view(
+            batch_size, self.num_nodes, self.hidden_size)  # (B, N, hidden)
 
         # ── GNN branch: TCN encode then step through time ───────────────────
         x_tcn = x.permute(0, 2, 1)                     # (B, 1, T)
@@ -2216,11 +2228,12 @@ class GRUGNNLiquidNetworkModel(nn.Module):
         gate_vals = []
         fused     = []
         for n in range(self.num_nodes):
-            r_n  = hidden_gnn[n]                            # (B, hidden)
+            h_n  = h_nodes[:, n, :]                         # (B, hidden) per-node temporal
+            r_n  = hidden_gnn[n]                            # (B, hidden) per-node relational
             gate = torch.sigmoid(
-                self.gate(torch.cat([h_gru, r_n], dim=-1))  # (B, 2*hidden) → (B, hidden)
+                self.gate(torch.cat([h_n, r_n], dim=-1))    # (B, 2*hidden) → (B, hidden)
             )
-            z_n  = gate * h_gru + (1.0 - gate) * r_n       # convex mix
+            z_n  = gate * h_n + (1.0 - gate) * r_n         # convex mix
             gate_vals.append(gate)
             fused.append(z_n)
 

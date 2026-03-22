@@ -37,6 +37,38 @@ THRESHOLDS = {'dish washer': 10.0, 'fridge': 10.0,
               'microwave': 10.0, 'washer dryer': 0.5}
 
 
+class PerApplianceWeightedMSELoss(torch.nn.Module):
+    """
+    Per-appliance weighted MSE loss that upweights ON-state samples.
+
+    For each appliance i:
+        weight[i, sample] = on_weight[i]  if target > threshold_norm[i]
+                          = 1.0           otherwise
+        loss += mean(weight * (pred - target)^2)
+
+    on_weight is computed from training data class imbalance:
+        on_weight = (1 - on_ratio) / on_ratio,  capped at 30x
+    """
+    def __init__(self, on_weights, on_thresholds_norm):
+        super().__init__()
+        self.on_weights         = [min(float(w), 30.0) for w in on_weights]
+        self.on_thresholds_norm = [float(t) for t in on_thresholds_norm]
+
+    def forward(self, pred, target):
+        # pred, target: (B, N)
+        total = 0.0
+        for i in range(pred.shape[1]):
+            p_i = pred[:, i]
+            t_i = target[:, i]
+            w_i = torch.where(
+                t_i > self.on_thresholds_norm[i],
+                torch.full_like(t_i, self.on_weights[i]),
+                torch.ones_like(t_i)
+            )
+            total = total + torch.mean(w_i * (p_i - t_i) ** 2)
+        return total / pred.shape[1]
+
+
 class REDDMultiDataset(torch.utils.data.Dataset):
     """Dataset returning (aggregate_window, all_appliance_targets)."""
     def __init__(self, X, y):
@@ -164,12 +196,26 @@ def train_gru_gnn_lnn(data_dict, window_size=100,
     X_test  = x_scaler.transform(X_test.reshape(-1, 1)).reshape(X_test.shape)
 
     y_scalers = {}
+    on_weights         = []
+    on_thresholds_norm = []
     for i, app in enumerate(APPLIANCES):
         sc = MinMaxScaler()
+        # Compute class imbalance weight BEFORE normalising
+        raw_vals  = y_train[:, i]
+        on_ratio  = float((raw_vals > THRESHOLDS[app]).mean())
+        on_ratio  = max(on_ratio, 1e-6)
+        on_weight = (1.0 - on_ratio) / on_ratio
+        on_weights.append(on_weight)
+
         y_train[:, i:i+1] = sc.fit_transform(y_train[:, i:i+1])
         y_val[:,   i:i+1] = sc.transform(y_val[:,   i:i+1])
         y_test[:,  i:i+1] = sc.transform(y_test[:,  i:i+1])
         y_scalers[app] = sc
+
+        thresh_norm = float(sc.transform([[THRESHOLDS[app]]])[0][0])
+        on_thresholds_norm.append(thresh_norm)
+        print(f"  {app}: on_ratio={on_ratio:.3f}  on_weight={min(on_weight,30):.1f}x  "
+              f"threshold_norm={thresh_norm:.4f}")
 
     train_loader = torch.utils.data.DataLoader(
         REDDMultiDataset(X_train, y_train), batch_size=32, shuffle=True)
@@ -192,11 +238,12 @@ def train_gru_gnn_lnn(data_dict, window_size=100,
         adj_matrix=adj
     ).to(device)
 
-    criterion = torch.nn.MSELoss()
+    criterion = PerApplianceWeightedMSELoss(on_weights, on_thresholds_norm)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=3)
 
+    mse_loss = torch.nn.MSELoss()   # used for val/test tracking only
     history = {'train_loss': [], 'val_loss': [], 'val_metrics': []}
     best_val_loss = float('inf')
     counter = 0
@@ -230,7 +277,7 @@ def train_gru_gnn_lnn(data_dict, window_size=100,
             for inputs, targets in val_loader:
                 inputs, targets = inputs.to(device), targets.to(device)
                 outputs, _ = model(inputs)
-                val_loss += criterion(outputs, targets).item()
+                val_loss += mse_loss(outputs, targets).item()
                 all_targets_list.append(targets.cpu().numpy())
                 all_outputs_list.append(outputs.cpu().numpy())
 
@@ -293,7 +340,7 @@ def train_gru_gnn_lnn(data_dict, window_size=100,
         for inputs, targets in test_loader:
             inputs, targets = inputs.to(device), targets.to(device)
             outputs, gates = model(inputs)
-            test_loss += criterion(outputs, targets).item()
+            test_loss += mse_loss(outputs, targets).item()
             all_test_t.append(targets.cpu().numpy())
             all_test_o.append(outputs.cpu().numpy())
             all_test_gates.append(gates.cpu().numpy())
