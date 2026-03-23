@@ -967,8 +967,11 @@ class TCNLiquidNetworkModel(nn.Module):
         # Basic LNN ODE cell
         self.liquid = LiquidODECell(hidden_size, hidden_size, dt=dt)
 
-        # Output layer
-        self.fc = nn.Linear(hidden_size, output_size)
+        # Skip connection: global avg pool of TCN features → hidden_size
+        self.skip_projection = nn.Linear(num_channels[-1], hidden_size)
+
+        # Output layer takes concat of LNN path + skip path
+        self.fc = nn.Linear(hidden_size * 2, output_size)
 
     def forward(self, x):
         """
@@ -985,15 +988,19 @@ class TCNLiquidNetworkModel(nn.Module):
         x = self.tcn_encoder(x)                  # (batch_size, num_channels[-1], seq_len)
         x = x.transpose(1, 2)                    # (batch_size, seq_len, num_channels[-1])
 
-        # Project to hidden size
-        x = self.encoder_projection(x)           # (batch_size, seq_len, hidden_size)
+        # Skip path: global average pool over time → (batch_size, num_channels[-1])
+        h_skip = x.mean(dim=1)                   # (batch_size, num_channels[-1])
+        h_skip = self.skip_projection(h_skip)    # (batch_size, hidden_size)
 
-        # Step through LNN ODE cell
+        # LNN path: project then step through ODE cell
+        x = self.encoder_projection(x)           # (batch_size, seq_len, hidden_size)
         h = torch.zeros(batch_size, self.hidden_size, device=x.device)
         for t in range(seq_len):
             h = self.liquid(x[:, t, :], h)
 
-        return self.fc(h)
+        # Concat LNN output with skip and project to output
+        out = torch.cat([h, h_skip], dim=-1)     # (batch_size, hidden_size * 2)
+        return self.fc(out)
 
 
 class TCNAdvancedLiquidNetworkModelTwo(nn.Module):
