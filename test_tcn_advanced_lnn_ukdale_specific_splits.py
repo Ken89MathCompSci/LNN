@@ -126,6 +126,7 @@ def train_on_appliance(data_dict, appliance_name, window_size=100,
 
     history = {'train_loss': [], 'val_loss': [], 'val_metrics': []}
     best_val_loss = float('inf')
+    best_val_f1 = -1.0
     counter = 0
 
     print(f"Starting TCN-Advanced-LNN training for {appliance_name}...")
@@ -196,7 +197,25 @@ def train_on_appliance(data_dict, appliance_name, window_size=100,
                 print("Early stopping triggered")
                 break
 
+        if metrics['f1'] > best_val_f1:
+            best_val_f1 = metrics['f1']
+            best_f1_model_path = os.path.join(
+                save_dir, f"tcn_advanced_lnn_ukdale_{appliance_name.replace(' ', '_')}_best_f1.pth")
+            save_model(model,
+                       {'input_size': 1, 'output_size': 1,
+                        'hidden_size': hidden_size, 'num_layers': num_layers, 'dt': dt,
+                        'num_channels': num_channels, 'kernel_size': kernel_size, 'dropout': dropout},
+                       {'lr': lr, 'epochs': epochs, 'patience': patience,
+                        'window_size': window_size, 'appliance': appliance_name},
+                       metrics, best_f1_model_path)
+            print(f"Best F1 model saved (F1={best_val_f1:.4f}) to {best_f1_model_path}")
+
     print("Training completed!")
+
+    # Load best F1 model for test evaluation
+    checkpoint = torch.load(best_f1_model_path, map_location=device)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    print(f"Loaded best F1 model (val F1={best_val_f1:.4f}) for test evaluation")
 
     print("Evaluating on test set...")
     model.eval()
