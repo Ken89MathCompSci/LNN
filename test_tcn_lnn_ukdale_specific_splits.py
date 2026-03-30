@@ -1,7 +1,6 @@
 import sys
 import os
 import torch
-import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 import json
@@ -146,11 +145,6 @@ def train_tcn_lnn_on_appliance(data_dict, appliance_name, window_size=100,
     y_val   = y_scaler.transform(y_val)
     y_test  = y_scaler.transform(y_test)
 
-    # Normalised threshold for use in loss functions
-    raw_threshold = get_threshold_for_appliance(appliance_name)
-    threshold_norm = float(y_scaler.transform([[raw_threshold]])[0][0])
-    threshold_norm = max(0.01, min(threshold_norm, 0.99))  # clamp to valid range
-
     print(f"Training sequences:   {X_train.shape} -> {y_train.shape}")
     print(f"Validation sequences: {X_val.shape} -> {y_val.shape}")
     print(f"Test sequences:       {X_test.shape} -> {y_test.shape}")
@@ -195,16 +189,7 @@ def train_tcn_lnn_on_appliance(data_dict, appliance_name, window_size=100,
             inputs, targets = inputs.to(device), targets.to(device)
             optimizer.zero_grad()
             outputs = model(inputs)
-            # Option 3: weighted MSE — penalise missed ON states
-            weight = torch.where(targets > threshold_norm,
-                                 torch.tensor(3.0, device=device),
-                                 torch.tensor(1.0, device=device))
-            mse = (weight * (outputs - targets) ** 2).mean()
-            # Option 1: BCE detection loss
-            on_pred = torch.sigmoid((outputs - threshold_norm) * 10)
-            on_true = (targets > threshold_norm).float()
-            detect = F.binary_cross_entropy(on_pred, on_true)
-            loss = mse + 0.3 * detect
+            loss = criterion(outputs, targets)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
