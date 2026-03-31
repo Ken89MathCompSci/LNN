@@ -213,7 +213,7 @@ def train_on_appliance(data_dict, appliance_name, window_size=100,
     print("Training completed!")
 
     # Load best F1 model for test evaluation
-    checkpoint = torch.load(best_f1_model_path, map_location=device)
+    checkpoint = torch.load(best_f1_model_path, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint['model_state_dict'])
     print(f"Loaded best F1 model (val F1={best_val_f1:.4f}) for test evaluation")
 
