@@ -1273,6 +1273,74 @@ class GRULiquidNetworkModel(nn.Module):
         return self.fc(h)
 
 
+class GRUAdvancedLiquidNetworkModel(nn.Module):
+    """
+    Bidirectional GRU Encoder + AdvancedLiquidNetworkModel for NILM.
+
+    Architecture:
+        Input -> BiGRU -> Linear projection -> stacked AdvancedLiquidTimeLayer
+              (with inter-layer LayerNorm) -> FC -> Output
+
+    Mirrors the AdvancedLiquidNetworkModel (v1) pattern: inter-layer LayerNorm only.
+
+    Args:
+        input_size:    feature dim per timestep (1 for scalar power)
+        hidden_size:   hidden size for the LNN layers and projection
+        output_size:   number of outputs (1 for single appliance)
+        gru_hidden:    hidden size of the GRU (each direction)
+        num_gru_layers: number of stacked GRU layers
+        dropout:       dropout between GRU layers (only if num_gru_layers > 1)
+        dt:            LNN Euler integration step
+        num_layers:    number of stacked AdvancedLiquidTimeLayer layers
+    """
+    def __init__(self, input_size, hidden_size, output_size,
+                 gru_hidden=64, num_gru_layers=2, dropout=0.2, dt=0.1, num_layers=2):
+        super(GRUAdvancedLiquidNetworkModel, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+
+        self.gru = nn.GRU(
+            input_size=input_size,
+            hidden_size=gru_hidden,
+            num_layers=num_gru_layers,
+            batch_first=True,
+            bidirectional=True,
+            dropout=dropout if num_gru_layers > 1 else 0.0
+        )
+
+        self.encoder_projection = nn.Linear(gru_hidden * 2, hidden_size)
+
+        self.liquid_layers = nn.ModuleList([
+            AdvancedLiquidTimeLayer(hidden_size, hidden_size, dt) for _ in range(num_layers)
+        ])
+        self.layer_norms = nn.ModuleList([
+            nn.LayerNorm(hidden_size) for _ in range(num_layers)
+        ])
+
+        self.fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        """
+        Args:
+            x: (batch_size, seq_len, input_size)
+        Returns:
+            (batch_size, output_size)
+        """
+        batch_size, seq_len, _ = x.size()
+
+        gru_out, _ = self.gru(x)
+        x = self.encoder_projection(gru_out)
+
+        hidden_states = [None] * self.num_layers
+        for t in range(seq_len):
+            x_t = x[:, t, :]
+            for i in range(self.num_layers):
+                inp = x_t if i == 0 else self.layer_norms[i - 1](hidden_states[i - 1])
+                hidden_states[i] = self.liquid_layers[i](inp, hidden_states[i])
+
+        return self.fc(self.layer_norms[-1](hidden_states[-1]))
+
+
 class TransformerEncoderLiquidNetworkModel(nn.Module):
     """
     Transformer Encoder + Liquid Neural Network for NILM.
