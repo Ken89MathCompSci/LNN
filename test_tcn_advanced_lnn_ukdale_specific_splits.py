@@ -11,7 +11,7 @@ from sklearn.preprocessing import MinMaxScaler
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'Source Code'))
 
-from models import TCNAdvancedLiquidNetworkModelTwo
+from models import TCNAdvancedLiquidNetworkModel
 from utils import calculate_nilm_metrics, save_model
 
 
@@ -108,7 +108,7 @@ def train_on_appliance(data_dict, appliance_name, window_size=100,
     test_loader = torch.utils.data.DataLoader(
         UKDALEDataset(X_test, y_test), batch_size=32, shuffle=False)
 
-    model = TCNAdvancedLiquidNetworkModelTwo(
+    model = TCNAdvancedLiquidNetworkModel(
         input_size=1,
         hidden_size=hidden_size,
         output_size=1,
