@@ -38,7 +38,7 @@ class CombinedLoss(nn.Module):
     pos_weight = num_off_samples / num_on_samples (computed per appliance
     from training labels, capped at max_pos_weight to avoid instability).
     """
-    def __init__(self, pos_weight=10.0, bce_lambda=1.0):
+    def __init__(self, pos_weight=10.0, bce_lambda=0.1):
         super(CombinedLoss, self).__init__()
         self.bce_lambda = bce_lambda
         self.mse = nn.MSELoss()
@@ -51,10 +51,12 @@ class CombinedLoss(nn.Module):
         # Binary labels: 1 if above scaled threshold, 0 otherwise
         binary_targets = (targets >= threshold_scaled).float()
 
-        # Sigmoid outputs for BCE
+        # Sigmoid maps regression output to (0,1) probability — avoids treating
+        # scaled power values as logits which would blow up MAE/SAE
+        probs = torch.sigmoid(outputs)
         pw = torch.tensor([self.pos_weight], device=outputs.device)
-        bce_fn = nn.BCEWithLogitsLoss(pos_weight=pw)
-        loss_bce = bce_fn(outputs, binary_targets)
+        bce_fn = nn.BCELoss(weight=pw * binary_targets + (1 - binary_targets))
+        loss_bce = bce_fn(probs, binary_targets)
 
         return loss_mse + self.bce_lambda * loss_bce
 
@@ -102,7 +104,7 @@ def compute_pos_weight(y_train_scaled, threshold_scaled, max_pos_weight=20.0):
 def train_on_appliance(data_dict, appliance_name, window_size=100,
                        hidden_size=64, num_layers=2, dt=0.1,
                        num_channels=None, kernel_size=3, dropout=0.2,
-                       bce_lambda=1.0,
+                       bce_lambda=0.1,
                        epochs=80, lr=0.001, patience=20,
                        save_dir='models/tcn_advanced_lnn_combined_loss_ukdale'):
     if num_channels is None:
@@ -374,7 +376,7 @@ def train_on_appliance(data_dict, appliance_name, window_size=100,
 
 def test_on_all_appliances(window_size=100, hidden_size=64, num_layers=2, dt=0.1,
                            num_channels=None, kernel_size=3, dropout=0.2,
-                           bce_lambda=1.0,
+                           bce_lambda=0.1,
                            epochs=80, lr=0.001, patience=20):
     if num_channels is None:
         num_channels = [32, 64, 128]
@@ -467,7 +469,7 @@ if __name__ == "__main__":
         num_channels=[32, 64, 128],
         kernel_size=3,
         dropout=0.2,
-        bce_lambda=1.0,
+        bce_lambda=0.1,
         epochs=80,
         lr=0.001,
         patience=20
