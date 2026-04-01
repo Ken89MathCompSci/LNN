@@ -12,7 +12,10 @@
       "Bash(/c/Users/Admin/anaconda3/python.exe draw_lnn_cell.py)",
       "Bash(python -c \":*)",
       "Bash(py -c \":*)",
-      "Bash(py preprocess_ukdale_splits.py)"
+      "Bash(py preprocess_ukdale_splits.py)",
+      "Bash(ls test_*lnn*.py)",
+      "Bash(/c/Users/Admin/anaconda3/python.exe draw_gru_lnn_diagram.py)",
+      "Bash(/c/Users/Admin/anaconda3/python.exe draw_tcn_lnn_diagram.py)"
     ]
   }
 }
