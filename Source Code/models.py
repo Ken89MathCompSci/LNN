@@ -1059,6 +1059,97 @@ class TCNAdvancedLiquidNetworkModel(nn.Module):
         return self.fc(self.layer_norms[-1](hidden_states[-1]))
 
 
+class TCNAdvancedLiquidNetworkMultiHeadModel(nn.Module):
+    """
+    Shared TCN Encoder + Separate LNN Head per Appliance for multi-task NILM.
+
+    Architecture:
+        Input -> Shared TCN Blocks -> Shared Linear projection
+              -> Per-appliance stacked AdvancedLiquidTimeLayer (inter-LayerNorm only)
+              -> Per-appliance FC -> Output (batch, num_appliances)
+
+    The shared encoder learns general temporal features from the mains signal,
+    while each appliance head models its own specific consumption dynamics.
+
+    Args:
+        input_size:      feature dim per timestep (1 for scalar power)
+        hidden_size:     hidden size for projection and all LNN heads
+        num_appliances:  number of appliance heads (default 4)
+        dt:              LNN Euler integration step
+        num_channels:    TCN channel sizes per block (default [32, 64, 128])
+        kernel_size:     TCN kernel size
+        dropout:         TCN dropout
+        num_layers:      number of AdvancedLiquidTimeLayer per head
+    """
+    def __init__(self, input_size, hidden_size, num_appliances=4, dt=0.1,
+                 num_channels=None, kernel_size=3, dropout=0.2, num_layers=2):
+        super(TCNAdvancedLiquidNetworkMultiHeadModel, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.num_appliances = num_appliances
+
+        if num_channels is None:
+            num_channels = [32, 64, 128]
+
+        # Shared TCN encoder
+        tcn_layers = []
+        in_ch = input_size
+        for i, out_ch in enumerate(num_channels):
+            dilation = 2 ** i
+            tcn_layers.append(TCNBlock(in_ch, out_ch, kernel_size, dilation, dropout))
+            in_ch = out_ch
+        self.tcn_encoder = nn.Sequential(*tcn_layers)
+        self.encoder_projection = nn.Linear(num_channels[-1], hidden_size)
+
+        # Per-appliance LNN heads: each has its own liquid layers + layer norms + FC
+        self.liquid_layers = nn.ModuleList([
+            nn.ModuleList([
+                AdvancedLiquidTimeLayer(hidden_size, hidden_size, dt)
+                for _ in range(num_layers)
+            ])
+            for _ in range(num_appliances)
+        ])
+        self.layer_norms = nn.ModuleList([
+            nn.ModuleList([
+                nn.LayerNorm(hidden_size)
+                for _ in range(num_layers)
+            ])
+            for _ in range(num_appliances)
+        ])
+        self.fc_heads = nn.ModuleList([
+            nn.Linear(hidden_size, 1) for _ in range(num_appliances)
+        ])
+
+    def forward(self, x):
+        """
+        Args:
+            x: (batch_size, seq_len, input_size)
+        Returns:
+            (batch_size, num_appliances)
+        """
+        batch_size, seq_len, _ = x.size()
+
+        # Shared TCN encoding
+        x = x.transpose(1, 2)
+        x = self.tcn_encoder(x)
+        x = x.transpose(1, 2)
+        x = self.encoder_projection(x)  # (batch, seq_len, hidden_size)
+
+        # Per-appliance LNN heads
+        outputs = []
+        for a in range(self.num_appliances):
+            hidden_states = [None] * self.num_layers
+            for t in range(seq_len):
+                x_t = x[:, t, :]
+                for i in range(self.num_layers):
+                    inp = x_t if i == 0 else self.layer_norms[a][i - 1](hidden_states[i - 1])
+                    hidden_states[i] = self.liquid_layers[a][i](inp, hidden_states[i])
+            out = self.fc_heads[a](self.layer_norms[a][-1](hidden_states[-1]))
+            outputs.append(out)
+
+        return torch.cat(outputs, dim=1)  # (batch, num_appliances)
+
+
 class TCNAdvancedLiquidNetworkModelTwo(nn.Module):
     """
     TCN Encoder + AdvancedLiquidNetworkModelTwo for NILM.
