@@ -375,9 +375,20 @@ def train_on_appliance(data_dict, appliance_name, window_size=100,
 def test_on_all_appliances(window_size=100, hidden_size=64, num_layers=2, dt=0.1,
                            num_channels=None, kernel_size=3, dropout=0.2,
                            alpha=0.75, gamma=2.0, focal_lambda=0.1,
+                           per_appliance_gamma=None, per_appliance_alpha=None,
                            epochs=80, lr=0.001, patience=20):
+    """
+    per_appliance_gamma: dict overriding gamma for specific appliances.
+                         e.g. {'dish washer': 4.0} — all others use global gamma.
+    per_appliance_alpha: dict overriding alpha for specific appliances.
+                         e.g. {'dish washer': 0.9}
+    """
     if num_channels is None:
         num_channels = [32, 64, 128]
+    if per_appliance_gamma is None:
+        per_appliance_gamma = {}
+    if per_appliance_alpha is None:
+        per_appliance_alpha = {}
 
     data_dict = load_ukdale_specific_splits()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -387,8 +398,12 @@ def test_on_all_appliances(window_size=100, hidden_size=64, num_layers=2, dt=0.1
     appliances = ['dish washer', 'fridge', 'microwave', 'washer dryer']
 
     for appliance_name in appliances:
+        app_gamma = per_appliance_gamma.get(appliance_name, gamma)
+        app_alpha = per_appliance_alpha.get(appliance_name, alpha)
+
         print(f"\n{'='*60}")
         print(f"Testing TCN-Advanced-LNN (Focal Loss) on {appliance_name}")
+        print(f"  alpha={app_alpha}  gamma={app_gamma}  focal_lambda={focal_lambda}")
         print(f"{'='*60}\n")
 
         appliance_dir = os.path.join(base_save_dir, appliance_name.replace(' ', '_'))
@@ -405,8 +420,8 @@ def test_on_all_appliances(window_size=100, hidden_size=64, num_layers=2, dt=0.1
                 num_channels=num_channels,
                 kernel_size=kernel_size,
                 dropout=dropout,
-                alpha=alpha,
-                gamma=gamma,
+                alpha=app_alpha,
+                gamma=app_gamma,
                 focal_lambda=focal_lambda,
                 epochs=epochs,
                 lr=lr,
@@ -430,7 +445,11 @@ def test_on_all_appliances(window_size=100, hidden_size=64, num_layers=2, dt=0.1
         'timestamp': timestamp,
         'dataset': 'UKDALE',
         'loss': 'MSE + Focal Loss',
-        'loss_params': {'alpha': alpha, 'gamma': gamma, 'focal_lambda': focal_lambda},
+        'loss_params': {
+            'alpha': alpha, 'gamma': gamma, 'focal_lambda': focal_lambda,
+            'per_appliance_gamma': per_appliance_gamma,
+            'per_appliance_alpha': per_appliance_alpha
+        },
         'dataset_splits': {
             'training':   {'house': 1, 'date': '2014-11-09'},
             'validation': {'house': 1, 'date': '2014-12-07'},
@@ -472,6 +491,8 @@ if __name__ == "__main__":
         alpha=0.75,
         gamma=2.0,
         focal_lambda=0.1,
+        per_appliance_gamma={'dish washer': 4.0},
+        per_appliance_alpha={'dish washer': 0.9},
         epochs=80,
         lr=0.001,
         patience=20
