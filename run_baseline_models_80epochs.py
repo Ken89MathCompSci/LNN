@@ -205,6 +205,7 @@ def train_model(model_key, appliance_name, splits, device, optimizer_key='adam')
     no_improve = 0
     train_losses, val_losses = [], []
     val_mae_hist, val_sae_hist, val_f1_hist = [], [], []
+    val_precision_hist, val_recall_hist = [], []
 
     for epoch in range(EPOCHS):
         # ── Train ──
@@ -243,10 +244,14 @@ def train_model(model_key, appliance_name, splits, device, optimizer_key='adam')
         val_mae_hist.append(ep_m['mae'])
         val_sae_hist.append(ep_m['sae'])
         val_f1_hist.append(ep_m['f1'])
+        val_precision_hist.append(ep_m['precision'])
+        val_recall_hist.append(ep_m['recall'])
 
         print(f"  [{MODEL_LABELS[model_key]} | {appliance_name}] "
               f"Epoch {epoch+1:3d}/{EPOCHS}  "
               f"train={avg_tr:.5f}  val={avg_va:.5f}  "
+              f"F1={ep_m['f1']:.4f}  MAE={ep_m['mae']:.2f}  SAE={ep_m['sae']:.4f}  "
+              f"P={ep_m['precision']:.4f}  R={ep_m['recall']:.4f}  "
               f"lr={optimizer.param_groups[0]['lr']:.2e}")
 
         if avg_va < best_val:
@@ -272,7 +277,7 @@ def train_model(model_key, appliance_name, splits, device, optimizer_key='adam')
     y_true = np.concatenate(trues)
     metrics = calculate_metrics(y_true, y_pred, thr)
 
-    return metrics, train_losses, val_losses, val_mae_hist, val_sae_hist, val_f1_hist
+    return metrics, train_losses, val_losses, val_mae_hist, val_sae_hist, val_f1_hist, val_precision_hist, val_recall_hist
 
 
 # ── Plotting helpers ──────────────────────────────────────────────────────────
@@ -380,10 +385,10 @@ def training_curves(model_key, curves, save_path):
 
 
 def epoch_metric_curves(model_key, epoch_metrics, save_path):
-    """Val MAE, SAE, F1 across epochs for one model (all appliances)."""
-    metric_info = [('mae', 'MAE (W)'), ('sae', 'SAE'), ('f1', 'F1')]
+    """Val MAE, SAE, F1, Precision, Recall across epochs for one model (all appliances)."""
+    metric_info = [('mae', 'MAE (W)'), ('sae', 'SAE'), ('f1', 'F1'), ('precision', 'Precision'), ('recall', 'Recall')]
     n = len(APPLIANCES)
-    fig, axes = plt.subplots(n, 3, figsize=(15, 4 * n))
+    fig, axes = plt.subplots(n, 5, figsize=(25, 4 * n))
     color = MODEL_COLORS[model_key]
     for row, app in enumerate(APPLIANCES):
         em = epoch_metrics.get(app, {})
@@ -404,10 +409,10 @@ def epoch_metric_curves(model_key, epoch_metrics, save_path):
 
 
 def combined_epoch_metric_curves(all_epoch_metrics, save_path):
-    """Val MAE, SAE, F1 across epochs — all models on the same axes, one row per appliance."""
-    metric_info = [('mae', 'MAE (W)'), ('sae', 'SAE'), ('f1', 'F1')]
+    """Val MAE, SAE, F1, Precision, Recall across epochs — all models on the same axes, one row per appliance."""
+    metric_info = [('mae', 'MAE (W)'), ('sae', 'SAE'), ('f1', 'F1'), ('precision', 'Precision'), ('recall', 'Recall')]
     n = len(APPLIANCES)
-    fig, axes = plt.subplots(n, 3, figsize=(15, 4 * n))
+    fig, axes = plt.subplots(n, 5, figsize=(25, 4 * n))
     for row, app in enumerate(APPLIANCES):
         for col, (mk_key, mk_label) in enumerate(metric_info):
             ax = axes[row, col]
@@ -436,7 +441,7 @@ def print_table(all_results):
     model_keys = list(MODEL_LABELS.keys())
     divider = '─' * 80
 
-    for metric, label in [('f1', 'F1'), ('mae', 'MAE'), ('sae', 'SAE')]:
+    for metric, label in [('f1', 'F1'), ('precision', 'Precision'), ('recall', 'Recall'), ('mae', 'MAE'), ('sae', 'SAE')]:
         print(f"\n{'='*80}")
         print(f"  {label} Comparison")
         print(f"{'='*80}")
@@ -471,12 +476,14 @@ def run_one_model(mk, splits, device, optimizer_key='adam'):
     for app in APPLIANCES:
         print(f"\n  ▶  {app}")
         try:
-            m, tl, vl, mae_h, sae_h, f1_h = train_model(mk, app, splits, device, optimizer_key)
+            m, tl, vl, mae_h, sae_h, f1_h, prec_h, rec_h = train_model(mk, app, splits, device, optimizer_key)
             results[app] = m
             curves[app]  = (tl, vl)
-            epoch_metrics[app] = {'mae': mae_h, 'sae': sae_h, 'f1': f1_h}
+            epoch_metrics[app] = {'mae': mae_h, 'sae': sae_h, 'f1': f1_h,
+                                  'precision': prec_h, 'recall': rec_h}
             print(f"  ✅ {MODEL_LABELS[mk]:12s} | {app:15s} | "
-                  f"F1={m['f1']:.4f}  MAE={m['mae']:.2f}  SAE={m['sae']:.4f}")
+                  f"F1={m['f1']:.4f}  MAE={m['mae']:.2f}  SAE={m['sae']:.4f}  "
+                  f"P={m['precision']:.4f}  R={m['recall']:.4f}")
         except Exception as exc:
             import traceback
             print(f"  ❌ {MODEL_LABELS[mk]} / {app} failed: {exc}")
@@ -528,6 +535,10 @@ def generate_plots(all_results, all_epoch_metrics=None):
               os.path.join(SAVE_DIR, 'sae_per_appliance.png'))
     bar_chart(all_results, 'f1',  'F1 Score',
               os.path.join(SAVE_DIR, 'f1_per_appliance.png'))
+    bar_chart(all_results, 'precision', 'Precision',
+              os.path.join(SAVE_DIR, 'precision_per_appliance.png'))
+    bar_chart(all_results, 'recall', 'Recall',
+              os.path.join(SAVE_DIR, 'recall_per_appliance.png'))
     summary_chart(all_results, os.path.join(SAVE_DIR, 'summary_all_metrics.png'))
     f1_heatmap(all_results,    os.path.join(SAVE_DIR, 'f1_heatmap.png'))
     if all_epoch_metrics and any(all_epoch_metrics.values()):
