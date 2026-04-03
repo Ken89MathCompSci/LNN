@@ -258,7 +258,7 @@ def train_on_appliance(splits, appliance_name, save_dir,
                 out = model(xb)
                 vl_loss += mse_only(out, yb).item()
                 val_preds.append(out.cpu().numpy())
-                val_trues.append(yb.numpy())
+                val_trues.append(yb.cpu().numpy())
 
         avg_va = vl_loss / len(va_loader)
         history['val_loss'].append(avg_va)
@@ -295,7 +295,7 @@ def train_on_appliance(splits, appliance_name, save_dir,
     with torch.no_grad():
         for xb, yb in te_loader:
             preds.append(model(xb.to(device)).cpu().numpy())
-            trues.append(yb.numpy())
+            trues.append(yb.cpu().numpy())
 
     y_pred = np.concatenate(preds)
     y_true = np.concatenate(trues)
