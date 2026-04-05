@@ -11,7 +11,7 @@ import pickle
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'Source Code'))
 
-from models import TCNAdvancedLiquidNetworkModel
+from models import TCNAdvancedLiquidNetworkModelTwo as TCNAdvancedLiquidNetworkModel
 from utils import save_model
 
 
