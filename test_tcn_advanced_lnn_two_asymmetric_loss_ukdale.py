@@ -8,12 +8,11 @@ import json
 from datetime import datetime
 from tqdm import tqdm
 import pickle
-from sklearn.preprocessing import MinMaxScaler
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'Source Code'))
 
 from models import TCNAdvancedLiquidNetworkModelTwo
-from utils import calculate_nilm_metrics, save_model
+from utils import save_model
 
 
 # ---------------------------------------------------------------------------
@@ -118,21 +117,49 @@ def load_data():
     return splits
 
 
-def create_sequences(data, window_size=WIN):
-    mains = data['main'].values
-    X, stride = [], STRIDE
-    for i in range(0, len(mains) - window_size + 1, stride):
+def create_sequences(df, appliance_name, window_size=WIN, stride=STRIDE):
+    mains   = df['main'].values
+    targets = df[appliance_name].values
+    X, y = [], []
+    for i in range(0, len(mains) - window_size, stride):
         X.append(mains[i:i + window_size])
-    return np.array(X, dtype=np.float32).reshape(-1, window_size, 1)
-
-
-def get_threshold_for_appliance(appliance_name):
-    return 0.5 if appliance_name == 'washer dryer' else 10.0
+        midpoint = i + window_size // 2
+        y.append(targets[midpoint])
+    return (
+        np.array(X, dtype=np.float32).reshape(-1, window_size, 1),
+        np.array(y, dtype=np.float32).reshape(-1, 1),
+    )
 
 
 # ---------------------------------------------------------------------------
-# Metrics  (uses calculate_nilm_metrics from utils)
+# Metrics  (matches run_baseline_models_80epochs.py exactly)
 # ---------------------------------------------------------------------------
+
+def calculate_metrics(y_true, y_pred, threshold):
+    y_true = y_true.flatten()
+    y_pred = y_pred.flatten()
+
+    mae = float(np.mean(np.abs(y_true - y_pred)))
+
+    N = 100
+    num_periods = len(y_true) // N
+    diff = sum(
+        abs(np.sum(y_true[i*N:(i+1)*N]) - np.sum(y_pred[i*N:(i+1)*N]))
+        for i in range(num_periods)
+    )
+    sae = float(diff / (N * num_periods)) if num_periods > 0 else 0.0
+
+    t_bin = (y_true > threshold).astype(int)
+    p_bin = (y_pred > threshold).astype(int)
+    tp = int(np.sum((t_bin == 1) & (p_bin == 1)))
+    fp = int(np.sum((t_bin == 0) & (p_bin == 1)))
+    fn = int(np.sum((t_bin == 1) & (p_bin == 0)))
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall    = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+    return {'mae': mae, 'sae': sae, 'f1': float(f1),
+            'precision': float(precision), 'recall': float(recall)}
 
 
 # ---------------------------------------------------------------------------
@@ -150,39 +177,29 @@ def train_on_appliance(splits, appliance_name, save_dir,
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
-    raw_threshold = get_threshold_for_appliance(appliance_name)
+    thr      = THRESHOLDS[appliance_name]
     loss_p   = APPLIANCE_LOSS_PARAMS[appliance_name]
     mode_str = 'FP-penalised' if loss_p['beta'] > loss_p['alpha'] else 'FN-penalised'
 
-    X_tr = create_sequences(splits['train'], WIN)
-    X_va = create_sequences(splits['val'],   WIN)
-    X_te = create_sequences(splits['test'],  WIN)
+    # Sequences
+    X_tr, y_tr = create_sequences(splits['train'], appliance_name)
+    X_va, y_va = create_sequences(splits['val'],   appliance_name)
+    X_te, y_te = create_sequences(splits['test'],  appliance_name)
 
-    y_tr = splits['train'][appliance_name].iloc[::STRIDE].values.reshape(-1, 1)[:len(X_tr)]
-    y_va = splits['val'][appliance_name].iloc[::STRIDE].values.reshape(-1, 1)[:len(X_va)]
-    y_te = splits['test'][appliance_name].iloc[::STRIDE].values.reshape(-1, 1)[:len(X_te)]
-
-    x_scaler = MinMaxScaler()
-    y_scaler = MinMaxScaler()
-
-    X_tr = x_scaler.fit_transform(X_tr.reshape(-1, 1)).reshape(X_tr.shape).astype(np.float32)
-    X_va = x_scaler.transform(X_va.reshape(-1, 1)).reshape(X_va.shape).astype(np.float32)
-    X_te = x_scaler.transform(X_te.reshape(-1, 1)).reshape(X_te.shape).astype(np.float32)
-
-    y_tr = y_scaler.fit_transform(y_tr).astype(np.float32)
-    y_va = y_scaler.transform(y_va).astype(np.float32)
-    y_te = y_scaler.transform(y_te).astype(np.float32)
-
-    threshold_scaled = float(y_scaler.transform([[raw_threshold]])[0][0])
+    # Z-score normalise X using training stats (no y-scaling)
+    mu    = float(X_tr.mean())
+    sigma = float(X_tr.std()) + 1e-8
+    X_tr = (X_tr - mu) / sigma
+    X_va = (X_va - mu) / sigma
+    X_te = (X_te - mu) / sigma
 
     print(f"Training sequences:   {X_tr.shape} -> {y_tr.shape}")
     print(f"Validation sequences: {X_va.shape} -> {y_va.shape}")
     print(f"Test sequences:       {X_te.shape} -> {y_te.shape}")
 
-    num_on  = int((y_tr >= threshold_scaled).sum())
-    num_off = int((y_tr <  threshold_scaled).sum())
-    print(f"Threshold (raw): {raw_threshold}W  |  Threshold (scaled): {threshold_scaled:.4f}"
-          f"  |  ON: {num_on}  |  OFF: {num_off}")
+    num_on  = int((y_tr >= thr).sum())
+    num_off = int((y_tr <  thr).sum())
+    print(f"Threshold: {thr}W  |  ON: {num_on}  |  OFF: {num_off}")
     print(f"Asymmetric BCE -> alpha={loss_p['alpha']}  beta={loss_p['beta']}  "
           f"bce_lambda={bce_lambda}  [{mode_str}]")
 
@@ -204,7 +221,7 @@ def train_on_appliance(splits, appliance_name, save_dir,
     mse_only  = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=3)
+        optimizer, mode='min', factor=0.5, patience=8, min_lr=1e-5)
 
     history = {'train_loss': [], 'val_loss': [], 'val_metrics': []}
     best_val_loss = float('inf')
@@ -222,7 +239,7 @@ def train_on_appliance(splits, appliance_name, save_dir,
         for xb, yb in progress_bar:
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
-            loss = criterion(model(xb), yb, threshold_scaled)
+            loss = criterion(model(xb), yb, thr)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
@@ -247,11 +264,9 @@ def train_on_appliance(splits, appliance_name, save_dir,
         history['val_loss'].append(avg_va)
         scheduler.step(avg_va)
 
-        raw_tgts = y_scaler.inverse_transform(
-            np.concatenate(val_trues).reshape(-1, 1)).flatten()
-        raw_outs = y_scaler.inverse_transform(
-            np.concatenate(val_preds).reshape(-1, 1)).flatten()
-        m = calculate_nilm_metrics(raw_tgts, raw_outs, threshold=raw_threshold)
+        ep_pred = np.concatenate(val_preds)
+        ep_true = np.concatenate(val_trues)
+        m = calculate_metrics(ep_true, ep_pred, thr)
         history['val_metrics'].append(m)
 
         print(f"  [{appliance_name}] Epoch {epoch+1:3d}/{EPOCHS}  "
@@ -281,9 +296,9 @@ def train_on_appliance(splits, appliance_name, save_dir,
             preds.append(model(xb.to(device)).cpu().numpy())
             trues.append(yb.cpu().numpy())
 
-    y_pred = y_scaler.inverse_transform(np.concatenate(preds).reshape(-1, 1)).flatten()
-    y_true = y_scaler.inverse_transform(np.concatenate(trues).reshape(-1, 1)).flatten()
-    test_metrics = calculate_nilm_metrics(y_true, y_pred, threshold=raw_threshold)
+    y_pred = np.concatenate(preds)
+    y_true = np.concatenate(trues)
+    test_metrics = calculate_metrics(y_true, y_pred, thr)
 
     val_mae_series       = [m['mae']       for m in history['val_metrics']]
     val_sae_series       = [m['sae']       for m in history['val_metrics']]
@@ -376,7 +391,7 @@ def train_on_appliance(splits, appliance_name, save_dir,
         },
         'train_params': {'lr': LR, 'epochs': EPOCHS, 'patience': PATIENCE},
         'final_metrics': {
-            'test_metrics': {k: float(v) for k, v in test_metrics.items()},
+            'test_metrics': test_metrics,
             'aggregates': aggregates
         }
     }
@@ -421,7 +436,7 @@ def run_all(hidden_size=64, num_layers=2, dt=0.1,
                 num_channels=num_channels, kernel_size=kernel_size,
                 dropout=dropout, bce_lambda=bce_lambda
             )
-            all_results[appliance_name] = test_metrics
+            all_results[appliance_name] = {k: float(v) for k, v in test_metrics.items()}
         except Exception as e:
             print(f"Error on {appliance_name}: {str(e)}")
             import traceback
