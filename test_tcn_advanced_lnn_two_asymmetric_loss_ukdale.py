@@ -165,13 +165,13 @@ def train_on_appliance(splits, appliance_name, save_dir,
     x_scaler = MinMaxScaler()
     y_scaler = MinMaxScaler()
 
-    X_tr = x_scaler.fit_transform(X_tr.reshape(-1, 1)).reshape(X_tr.shape)
-    X_va = x_scaler.transform(X_va.reshape(-1, 1)).reshape(X_va.shape)
-    X_te = x_scaler.transform(X_te.reshape(-1, 1)).reshape(X_te.shape)
+    X_tr = x_scaler.fit_transform(X_tr.reshape(-1, 1)).reshape(X_tr.shape).astype(np.float32)
+    X_va = x_scaler.transform(X_va.reshape(-1, 1)).reshape(X_va.shape).astype(np.float32)
+    X_te = x_scaler.transform(X_te.reshape(-1, 1)).reshape(X_te.shape).astype(np.float32)
 
-    y_tr = y_scaler.fit_transform(y_tr)
-    y_va = y_scaler.transform(y_va)
-    y_te = y_scaler.transform(y_te)
+    y_tr = y_scaler.fit_transform(y_tr).astype(np.float32)
+    y_va = y_scaler.transform(y_va).astype(np.float32)
+    y_te = y_scaler.transform(y_te).astype(np.float32)
 
     threshold_scaled = float(y_scaler.transform([[raw_threshold]])[0][0])
 
