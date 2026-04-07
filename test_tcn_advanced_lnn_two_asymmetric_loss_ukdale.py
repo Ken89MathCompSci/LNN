@@ -376,7 +376,7 @@ def train_on_appliance(splits, appliance_name, save_dir,
         },
         'train_params': {'lr': LR, 'epochs': EPOCHS, 'patience': PATIENCE},
         'final_metrics': {
-            'test_metrics': test_metrics,
+            'test_metrics': {k: float(v) for k, v in test_metrics.items()},
             'aggregates': aggregates
         }
     }
