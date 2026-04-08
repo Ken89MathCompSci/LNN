@@ -434,7 +434,7 @@ def run_all(hidden_size=64, num_layers=2, dt=0.1,
                 splits, appliance_name, appliance_dir,
                 hidden_size=hidden_size, num_layers=num_layers, dt=dt,
                 num_channels=num_channels, kernel_size=kernel_size,
-                dropout=dropout, bce_lambda=bce_lambda
+                dropout=dropout, bce_lambda=bce_lambda,
             )
             all_results[appliance_name] = {k: float(v) for k, v in test_metrics.items()}
         except Exception as e:
