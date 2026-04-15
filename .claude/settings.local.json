@@ -16,7 +16,10 @@
       "Bash(ls test_*lnn*.py)",
       "Bash(/c/Users/Admin/anaconda3/python.exe draw_gru_lnn_diagram.py)",
       "Bash(/c/Users/Admin/anaconda3/python.exe draw_tcn_lnn_diagram.py)",
-      "Bash(python test_tcn_advanced_lnn_asymmetric_loss_redd.py)"
+      "Bash(python test_tcn_advanced_lnn_asymmetric_loss_redd.py)",
+      "Bash(python -c \"from einops import rearrange; print\\('einops ok'\\)\")",
+      "Bash(python3 -c \"from einops import rearrange; print\\('einops ok'\\)\")",
+      "Bash(py -c \"from einops import rearrange; print\\('einops ok'\\)\")"
     ]
   }
 }
