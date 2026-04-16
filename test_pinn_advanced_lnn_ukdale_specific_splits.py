@@ -67,7 +67,7 @@ BATCH       = 32
 WIN         = 100
 STRIDE      = 5
 
-LAMBDA_PHYS = 0.1    # physics loss weight
+LAMBDA_PHYS = 0.01   # physics loss weight — kept small so MSE dominates
 EPSILON_W   = 50.0   # tolerance for background / unlabelled loads (Watts)
 
 APPLIANCES = ['dish washer', 'fridge', 'microwave', 'washer dryer']
@@ -431,7 +431,8 @@ def train_pinn_model(data_dict, save_dir,
         history['val_phys'].append(avg_va_phys)
         history['val_loss'].append(avg_va_total)
 
-        scheduler.step(avg_va_total)
+        # Step scheduler on MSE only — total loss oscillates due to physics term
+        scheduler.step(avg_va_mse)
 
         y_pred_all = np.concatenate(val_preds)
         y_true_all = np.concatenate(val_trues)
@@ -456,8 +457,10 @@ def train_pinn_model(data_dict, save_dir,
                   f"P={m['precision']:.4f}  R={m['recall']:.4f}  "
                   f"MAE={m['mae']:.2f}  SAE={m['sae']:.4f}")
 
-        if avg_va_total < best_val_loss:
-            best_val_loss = avg_va_total
+        # Early stop on val MSE — prevents physics oscillations from triggering
+        # early stopping before regression has converged
+        if avg_va_mse < best_val_loss:
+            best_val_loss = avg_va_mse
             best_state    = {k: v.clone() for k, v in model.state_dict().items()}
             counter       = 0
         else:
