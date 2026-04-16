@@ -63,8 +63,9 @@ BATCH       = 32
 WIN         = 100
 STRIDE      = 5
 
-LAMBDA_PHYS = 0.01   # physics loss weight — kept small so MSE dominates
-EPSILON_W   = 50.0   # tolerance for background / unlabelled loads (Watts)
+LAMBDA_PHYS   = 0.01   # physics loss weight — kept small so MSE dominates
+EPSILON_W     = 50.0   # tolerance for background / unlabelled loads (Watts)
+WARMUP_EPOCHS = 20     # Stage 1: MSE-only; physics + BCE added after this epoch
 
 APPLIANCES = ['dish washer', 'fridge', 'microwave', 'washer dryer']
 
@@ -362,20 +363,23 @@ def train_pinn_model(data_dict, save_dir,
             x_mid = xb[:, WIN // 2, 0]               # (batch,)
             phys_loss = phys_criterion(x_mid, pred)
 
-            # Per-appliance weighted BCE for imbalanced appliances
-            bce_loss = torch.tensor(0.0, device=device)
-            for i, app in enumerate(APPLIANCES):
-                if BCE_LAMBDA[app] > 0:
-                    pred_i = pred[:, i].clamp(1e-7, 1 - 1e-7)
-                    thr_s  = thresholds_scaled[i]
-                    y_bin  = (yb[:, i] > thr_s).float()
-                    w      = torch.where(y_bin == 1,
-                                         torch.full_like(y_bin, BCE_ALPHA[app]),
-                                         torch.ones_like(y_bin))
-                    bce_loss = bce_loss + BCE_LAMBDA[app] * F.binary_cross_entropy(
-                        pred_i, y_bin, weight=w)
-
-            loss = mse_loss + lambda_phys * phys_loss + bce_loss
+            # Stage 1 (warmup): MSE only — let regression converge first
+            # Stage 2: add physics + per-appliance BCE
+            if epoch < WARMUP_EPOCHS:
+                loss = mse_loss
+            else:
+                bce_loss = torch.tensor(0.0, device=device)
+                for i, app in enumerate(APPLIANCES):
+                    if BCE_LAMBDA[app] > 0:
+                        pred_i = pred[:, i].clamp(1e-7, 1 - 1e-7)
+                        thr_s  = thresholds_scaled[i]
+                        y_bin  = (yb[:, i] > thr_s).float()
+                        w      = torch.where(y_bin == 1,
+                                             torch.full_like(y_bin, BCE_ALPHA[app]),
+                                             torch.ones_like(y_bin))
+                        bce_loss = bce_loss + BCE_LAMBDA[app] * F.binary_cross_entropy(
+                            pred_i, y_bin, weight=w)
+                loss = mse_loss + lambda_phys * phys_loss + bce_loss
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
