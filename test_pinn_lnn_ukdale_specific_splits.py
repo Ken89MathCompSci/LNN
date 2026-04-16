@@ -99,8 +99,8 @@ class PhysicsConsistencyLoss(nn.Module):
         self.register_buffer('x_range', torch.tensor(x_range, dtype=torch.float32))
 
         # Per-appliance scaler params — stored as (n_apps,) vectors
-        y_mins   = [float(y_scalers[a].data_min_[0])   for a in appliances]
-        y_ranges = [float(y_scalers[a].data_range_[0]) for a in appliances]
+        y_mins   = [float(y_scalers[i].data_min_[0])   for i in range(len(appliances))]
+        y_ranges = [float(y_scalers[i].data_range_[0]) for i in range(len(appliances))]
         self.register_buffer('y_mins',   torch.tensor(y_mins,   dtype=torch.float32))
         self.register_buffer('y_ranges', torch.tensor(y_ranges, dtype=torch.float32))
 
