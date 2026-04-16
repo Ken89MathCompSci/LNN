@@ -139,6 +139,9 @@ class PhysicsInformedBasicLiquidNetworkModel(nn.Module):
         self.rec_weights = nn.Parameter(torch.empty(hidden_size, hidden_size))
         nn.init.xavier_uniform_(self.rec_weights)
 
+        # Intra-layer LayerNorm — normalises pre-activation at each timestep
+        self.intra_norm = nn.LayerNorm(hidden_size)
+
         # Normalise hidden state before heads
         self.norm = nn.LayerNorm(hidden_size)
 
@@ -163,7 +166,7 @@ class PhysicsInformedBasicLiquidNetworkModel(nn.Module):
             x_t        = x[:, t, :]
             input_proj = self.input_proj(x_t)
             rec_proj   = torch.matmul(h, self.rec_weights)
-            f_t        = torch.tanh(input_proj + rec_proj)
+            f_t        = torch.tanh(self.intra_norm(input_proj + rec_proj))
             dh         = (-h / tau + f_t) * self.dt
             h          = (h + dh).clamp(-10.0, 10.0)
 
