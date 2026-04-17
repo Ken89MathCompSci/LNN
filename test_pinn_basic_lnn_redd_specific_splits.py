@@ -62,8 +62,8 @@ THRESHOLDS = {
     'washer dryer':  0.5,
 }
 
-BCE_LAMBDA = {'dish washer': 0.5, 'fridge': 0.3, 'microwave': 0.0, 'washer dryer': 0.0}
-BCE_ALPHA  = {'dish washer': 2.0, 'fridge': 2.0, 'microwave': 1.0, 'washer dryer': 1.0}
+BCE_LAMBDA = {'dish washer': 0.5, 'fridge': 0.3, 'microwave': 0.3, 'washer dryer': 0.0}
+BCE_ALPHA  = {'dish washer': 2.0, 'fridge': 2.0, 'microwave': 0.3, 'washer dryer': 1.0}
 
 
 # ---------------------------------------------------------------------------
