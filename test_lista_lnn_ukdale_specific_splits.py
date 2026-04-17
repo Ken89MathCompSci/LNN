@@ -58,7 +58,7 @@ K_LAYERS    = 8      # number of unrolled ISTA iterations
 
 LAMBDA_RECON  = 0.1
 LAMBDA_SPARSE = 0.01
-LAMBDA_BCE    = 0.3
+WARMUP_EPOCHS = 15   # MSE-only warmup before BCE kicks in
 
 APPLIANCES = ['dish washer', 'fridge', 'microwave', 'washer dryer']
 
@@ -68,6 +68,10 @@ THRESHOLDS = {
     'microwave':    10.0,
     'washer dryer':  0.5,
 }
+
+# Per-appliance BCE weight and positive-class multiplier
+BCE_LAMBDA = {'dish washer': 0.3, 'fridge': 0.5, 'microwave': 2.0, 'washer dryer': 2.0}
+BCE_ALPHA  = {'dish washer': 2.0, 'fridge': 3.0, 'microwave': 8.0, 'washer dryer': 8.0}
 
 
 # ---------------------------------------------------------------------------
@@ -221,14 +225,16 @@ def train_on_appliance(data_dict, appliance_name,
                        epochs=EPOCHS, lr=LR, patience=PATIENCE,
                        lambda_recon=LAMBDA_RECON,
                        lambda_sparse=LAMBDA_SPARSE,
-                       lambda_bce=LAMBDA_BCE,
                        save_dir='models/lista_lnn_ukdale'):
     os.makedirs(save_dir, exist_ok=True)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    threshold = THRESHOLDS[appliance_name]
+    threshold  = THRESHOLDS[appliance_name]
+    bce_lambda = BCE_LAMBDA[appliance_name]
+    bce_alpha  = BCE_ALPHA[appliance_name]
     print(f"\nDevice: {device}  |  appliance: {appliance_name}")
     print(f"n_atoms={n_atoms}  K={k_layers}  "
-          f"λ_recon={lambda_recon}  λ_sparse={lambda_sparse}  λ_bce={lambda_bce}")
+          f"λ_recon={lambda_recon}  λ_sparse={lambda_sparse}  "
+          f"λ_bce={bce_lambda}  α_bce={bce_alpha}  warmup={WARMUP_EPOCHS}")
 
     # ── Sequences ──
     X_tr, y_tr = create_sequences(data_dict['train'], appliance_name, WIN)
@@ -297,15 +303,20 @@ def train_on_appliance(data_dict, appliance_name,
 
             sparse_loss = x.abs().mean()
 
-            pred_prob   = torch.sigmoid(power / (thr_scaled + 1e-8))
-            y_bin       = (yb > thr_scaled).float()
-            bce_loss    = F.binary_cross_entropy(
-                pred_prob.clamp(1e-7, 1 - 1e-7), y_bin)
-
-            loss = (mse_loss
-                    + lambda_recon  * recon_loss
-                    + lambda_sparse * sparse_loss
-                    + lambda_bce    * bce_loss)
+            if epoch < WARMUP_EPOCHS:
+                loss = mse_loss + lambda_recon * recon_loss + lambda_sparse * sparse_loss
+            else:
+                pred_prob = torch.sigmoid(power / (thr_scaled + 1e-8))
+                y_bin     = (yb > thr_scaled).float()
+                w         = torch.where(y_bin == 1,
+                                        torch.full_like(y_bin, bce_alpha),
+                                        torch.ones_like(y_bin))
+                bce_loss  = F.binary_cross_entropy(
+                    pred_prob.clamp(1e-7, 1 - 1e-7), y_bin, weight=w)
+                loss = (mse_loss
+                        + lambda_recon  * recon_loss
+                        + lambda_sparse * sparse_loss
+                        + bce_lambda    * bce_loss)
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -331,15 +342,21 @@ def train_on_appliance(data_dict, appliance_name,
                 y_flat      = xb.squeeze(-1)
                 recon_loss  = F.mse_loss(model.reconstruct(x), y_flat)
                 sparse_loss = x.abs().mean()
-                pred_prob   = torch.sigmoid(power / (thr_scaled + 1e-8))
-                y_bin       = (yb > thr_scaled).float()
-                bce_loss    = F.binary_cross_entropy(
-                    pred_prob.clamp(1e-7, 1 - 1e-7), y_bin)
 
-                loss = (mse_loss
-                        + lambda_recon  * recon_loss
-                        + lambda_sparse * sparse_loss
-                        + lambda_bce    * bce_loss)
+                if epoch < WARMUP_EPOCHS:
+                    loss = mse_loss + lambda_recon * recon_loss + lambda_sparse * sparse_loss
+                else:
+                    pred_prob = torch.sigmoid(power / (thr_scaled + 1e-8))
+                    y_bin     = (yb > thr_scaled).float()
+                    w         = torch.where(y_bin == 1,
+                                            torch.full_like(y_bin, bce_alpha),
+                                            torch.ones_like(y_bin))
+                    bce_loss  = F.binary_cross_entropy(
+                        pred_prob.clamp(1e-7, 1 - 1e-7), y_bin, weight=w)
+                    loss = (mse_loss
+                            + lambda_recon  * recon_loss
+                            + lambda_sparse * sparse_loss
+                            + bce_lambda    * bce_loss)
 
                 vl_loss += loss.item()
                 all_preds.append(power.cpu().numpy())
@@ -425,7 +442,8 @@ def train_on_appliance(data_dict, appliance_name,
         'train_params': {
             'lr': lr, 'epochs': epochs, 'patience': patience,
             'lambda_recon': lambda_recon, 'lambda_sparse': lambda_sparse,
-            'lambda_bce': lambda_bce,
+            'warmup_epochs': WARMUP_EPOCHS,
+            'bce_lambda': bce_lambda, 'bce_alpha': bce_alpha,
         },
         'final_metrics': {
             'test_metrics': {k: float(v) for k, v in test_metrics.items()},
@@ -508,8 +526,7 @@ def _plot_results(history, test_metrics, appliance_name, save_dir):
 def test_on_all_appliances(n_atoms=N_ATOMS, k_layers=K_LAYERS,
                            epochs=EPOCHS, lr=LR, patience=PATIENCE,
                            lambda_recon=LAMBDA_RECON,
-                           lambda_sparse=LAMBDA_SPARSE,
-                           lambda_bce=LAMBDA_BCE):
+                           lambda_sparse=LAMBDA_SPARSE):
     data_dict = load_ukdale_specific_splits()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     base_save_dir = f"models/lista_lnn_ukdale_specific_test_{timestamp}"
@@ -535,7 +552,6 @@ def test_on_all_appliances(n_atoms=N_ATOMS, k_layers=K_LAYERS,
                 patience=patience,
                 lambda_recon=lambda_recon,
                 lambda_sparse=lambda_sparse,
-                lambda_bce=lambda_bce,
                 save_dir=app_dir,
             )
             all_results[appliance_name] = {
@@ -563,7 +579,9 @@ def test_on_all_appliances(n_atoms=N_ATOMS, k_layers=K_LAYERS,
             'epochs': epochs, 'lr': lr, 'patience': patience,
             'lambda_recon': lambda_recon,
             'lambda_sparse': lambda_sparse,
-            'lambda_bce': lambda_bce,
+            'warmup_epochs': WARMUP_EPOCHS,
+            'bce_lambda': BCE_LAMBDA,
+            'bce_alpha': BCE_ALPHA,
         },
         'results': all_results,
     }
@@ -601,7 +619,6 @@ if __name__ == "__main__":
         patience=PATIENCE,
         lambda_recon=LAMBDA_RECON,
         lambda_sparse=LAMBDA_SPARSE,
-        lambda_bce=LAMBDA_BCE,
     )
 
     print(f"\nSummary — LISTA-LNN on UKDALE:")
