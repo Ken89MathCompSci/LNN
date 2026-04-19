@@ -250,14 +250,14 @@ def train_on_appliance(data_dict, appliance_name,
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
 
-            power, x   = model(xb)
-            mse_loss   = F.mse_loss(power, yb)
-            y_flat     = xb.squeeze(-1)
-            recon_loss = F.mse_loss(model.reconstruct(x), y_flat)
+            power, x    = model(xb)
+            reg_loss    = F.huber_loss(power, yb)
+            y_flat      = xb.squeeze(-1)
+            recon_loss  = F.mse_loss(model.reconstruct(x), y_flat)
             sparse_loss = x.abs().mean()
 
             if epoch < WARMUP_EPOCHS:
-                loss = mse_loss + lambda_recon * recon_loss + lambda_sparse * sparse_loss
+                loss = reg_loss + lambda_recon * recon_loss + lambda_sparse * sparse_loss
             else:
                 pred_prob = torch.sigmoid(power / (thr_scaled + 1e-8))
                 y_bin     = (yb > thr_scaled).float()
@@ -266,7 +266,7 @@ def train_on_appliance(data_dict, appliance_name,
                                         torch.ones_like(y_bin))
                 bce_loss  = F.binary_cross_entropy(
                     pred_prob.clamp(1e-7, 1 - 1e-7), y_bin, weight=w)
-                loss = (mse_loss
+                loss = (reg_loss
                         + lambda_recon  * recon_loss
                         + lambda_sparse * sparse_loss
                         + bce_lambda    * bce_loss)
@@ -277,7 +277,7 @@ def train_on_appliance(data_dict, appliance_name,
 
             ep_loss += loss.item()
             bar.set_postfix({'loss': f'{loss.item():.5f}',
-                             'mse':  f'{mse_loss.item():.5f}'})
+                             'huber': f'{reg_loss.item():.5f}'})
 
         avg_tr_loss = ep_loss / len(tr_loader)
         history['train_loss'].append(avg_tr_loss)
@@ -289,13 +289,13 @@ def train_on_appliance(data_dict, appliance_name,
             for xb, yb in va_loader:
                 xb, yb = xb.to(device), yb.to(device)
                 power, x    = model(xb)
-                mse_loss    = F.mse_loss(power, yb)
+                reg_loss    = F.huber_loss(power, yb)
                 y_flat      = xb.squeeze(-1)
                 recon_loss  = F.mse_loss(model.reconstruct(x), y_flat)
                 sparse_loss = x.abs().mean()
 
                 if epoch < WARMUP_EPOCHS:
-                    loss = mse_loss + lambda_recon * recon_loss + lambda_sparse * sparse_loss
+                    loss = reg_loss + lambda_recon * recon_loss + lambda_sparse * sparse_loss
                 else:
                     pred_prob = torch.sigmoid(power / (thr_scaled + 1e-8))
                     y_bin     = (yb > thr_scaled).float()
@@ -304,7 +304,7 @@ def train_on_appliance(data_dict, appliance_name,
                                             torch.ones_like(y_bin))
                     bce_loss  = F.binary_cross_entropy(
                         pred_prob.clamp(1e-7, 1 - 1e-7), y_bin, weight=w)
-                    loss = (mse_loss
+                    loss = (reg_loss
                             + lambda_recon  * recon_loss
                             + lambda_sparse * sparse_loss
                             + bce_lambda    * bce_loss)
@@ -365,6 +365,7 @@ def train_on_appliance(data_dict, appliance_name,
         np.concatenate(test_trues).reshape(-1, 1)).flatten()
     raw_pred_te = y_scaler.inverse_transform(
         np.concatenate(test_preds).reshape(-1, 1)).flatten()
+    raw_pred_te = np.where(raw_pred_te < threshold, 0.0, raw_pred_te)
     test_metrics = calculate_nilm_metrics(raw_true_te, raw_pred_te, threshold=threshold)
 
     print(f"\nTest  F1={test_metrics['f1']:.4f}  P={test_metrics['precision']:.4f}  "
