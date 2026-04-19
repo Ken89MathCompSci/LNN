@@ -10,10 +10,11 @@ All 4 appliances are predicted simultaneously (multi-head) so the full
 energy conservation constraint can be applied.
 
 Architecture:
-    y  (batch, WIN)
-     → initial x^(0) = 0
-     → K × LISTALayer  →  x^(K)  (batch, n_atoms)
-     → 4 × Linear head →  p̂     (batch, 4)
+    y  (batch, WIN, 1)
+     → BasicLiquidTimeLayer (fixed tau)  →  h  (batch, hidden)   [LNN encoder]
+     → Linear projection h → x^(0)                               [warm start]
+     → K × LISTALayer      →  x^(K)  (batch, n_atoms)            [sparse refinement]
+     → 4 × Linear heads    →  p̂     (batch, 4)
     Dictionary D (n_atoms, WIN) jointly learned for reconstruction.
 
 Loss:
@@ -50,6 +51,8 @@ WIN         = 100
 STRIDE      = 5
 N_ATOMS     = 64
 K_LAYERS    = 8
+HIDDEN_SIZE = 64   # LNN hidden state dimension
+DT          = 0.1  # LNN Euler step size
 
 LAMBDA_RECON  = 0.1
 LAMBDA_SPARSE = 0.01
@@ -130,25 +133,55 @@ class LISTALayer(nn.Module):
 # PINN-LISTA-LNN model (multi-head, all appliances simultaneously)
 # ---------------------------------------------------------------------------
 
-class PINNLISTANILMModel(nn.Module):
+class PINNLISTALNNModel(nn.Module):
     """
-    K unrolled LISTA layers + per-appliance linear heads + learned dictionary.
+    LNN temporal encoder → LISTA sparse refinement → per-appliance heads.
 
-    Predicts all appliances simultaneously so the physics constraint
-    Σ p̂_i ≤ P_agg + ε can be enforced during training.
+    Forward pass:
+        1. BasicLiquidTimeLayer processes (batch, WIN, 1) sequentially
+           → hidden state h  (batch, hidden_size)
+        2. h is projected to x^(0) as a warm start for LISTA
+           (replaces the usual zero initialisation)
+        3. K LISTA layers refine x^(0) → x^(K)  (batch, n_atoms)
+        4. Per-appliance linear heads → p̂  (batch, n_appliances)
+
+    LNN cell (Basic, fixed tau):
+        tau   = softplus(tau_param)
+        f_t   = tanh(W_in·x_t + W_rec·h)
+        dh    = (-h / tau + f_t) * dt
+        h_new = clamp(h + dh, -10, 10)
     """
 
-    def __init__(self, signal_len: int = WIN, n_atoms: int = N_ATOMS,
-                 k_layers: int = K_LAYERS, n_appliances: int = len(APPLIANCES)):
+    def __init__(self, signal_len: int = WIN,
+                 hidden_size: int = HIDDEN_SIZE,
+                 n_atoms: int = N_ATOMS,
+                 k_layers: int = K_LAYERS,
+                 n_appliances: int = len(APPLIANCES),
+                 dt: float = DT):
         super().__init__()
-        self.n_atoms = n_atoms
+        self.hidden_size = hidden_size
+        self.n_atoms     = n_atoms
+        self.dt          = dt
 
-        self.layers = nn.ModuleList([
+        # ── LNN encoder (Basic cell — fixed tau) ──
+        self.lnn_input  = nn.Linear(1, hidden_size)
+        self.lnn_tau    = nn.Parameter(torch.ones(hidden_size))
+        self.lnn_rec    = nn.Parameter(torch.empty(hidden_size, hidden_size))
+        nn.init.xavier_uniform_(self.lnn_rec)
+        self.lnn_norm   = nn.LayerNorm(hidden_size)
+
+        # Project LNN hidden state → LISTA warm-start x^(0)
+        self.h_to_x0 = nn.Linear(hidden_size, n_atoms)
+
+        # ── LISTA layers ──
+        self.lista_layers = nn.ModuleList([
             LISTALayer(signal_len, n_atoms) for _ in range(k_layers)
         ])
 
+        # Learned dictionary for reconstruction  y ≈ x @ D
         self.D = nn.Parameter(torch.randn(n_atoms, signal_len) * 0.01)
 
+        # ── Per-appliance output heads ──
         self.heads = nn.ModuleList([
             nn.Linear(n_atoms, 1) for _ in range(n_appliances)
         ])
@@ -156,19 +189,35 @@ class PINNLISTANILMModel(nn.Module):
     def forward(self, y: torch.Tensor):
         """
         Args:
-            y : (batch, WIN, 1) or (batch, WIN)
+            y : (batch, WIN, 1)
         Returns:
             power : (batch, n_appliances)
             x     : (batch, n_atoms)
         """
-        if y.dim() == 3:
-            y = y.squeeze(-1)
+        if y.dim() == 2:
+            y = y.unsqueeze(-1)                         # (batch, WIN, 1)
 
-        x = torch.zeros(y.size(0), self.n_atoms, device=y.device)
-        for layer in self.layers:
-            x = layer(y, x)
+        batch_size, seq_len, _ = y.size()
 
-        power = torch.cat([head(x) for head in self.heads], dim=1)  # (batch, n_apps)
+        # ── Stage 1: LNN temporal encoding ──
+        h   = torch.zeros(batch_size, self.hidden_size, device=y.device)
+        tau = F.softplus(self.lnn_tau).unsqueeze(0)     # (1, hidden)
+
+        for t in range(seq_len):
+            x_t  = y[:, t, :]                           # (batch, 1)
+            f_t  = torch.tanh(self.lnn_norm(
+                       self.lnn_input(x_t) + torch.matmul(h, self.lnn_rec)))
+            dh   = (-h / tau + f_t) * self.dt
+            h    = (h + dh).clamp(-10.0, 10.0)
+
+        # ── Stage 2: LISTA sparse refinement (warm-started from h) ──
+        x    = self.h_to_x0(h)                          # (batch, n_atoms)
+        y_flat = y.squeeze(-1)                           # (batch, WIN)
+        for layer in self.lista_layers:
+            x = layer(y_flat, x)
+
+        # ── Stage 3: per-appliance prediction ──
+        power = torch.cat([head(x) for head in self.heads], dim=1)
         return power, x
 
     def reconstruct(self, x: torch.Tensor) -> torch.Tensor:
@@ -240,6 +289,7 @@ def compute_per_appliance_metrics(y_true, y_pred, y_scalers):
 # ---------------------------------------------------------------------------
 
 def train_pinn_lista_model(data_dict, save_dir,
+                           hidden_size=HIDDEN_SIZE, dt=DT,
                            n_atoms=N_ATOMS, k_layers=K_LAYERS,
                            lambda_recon=LAMBDA_RECON,
                            lambda_sparse=LAMBDA_SPARSE,
@@ -248,8 +298,9 @@ def train_pinn_lista_model(data_dict, save_dir,
     os.makedirs(save_dir, exist_ok=True)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
-    print(f"n_atoms={n_atoms}  K={k_layers}  λ_recon={lambda_recon}  "
-          f"λ_sparse={lambda_sparse}  λ_phys={lambda_phys}  ε={epsilon_w}W")
+    print(f"hidden={hidden_size}  dt={dt}  n_atoms={n_atoms}  K={k_layers}  "
+          f"λ_recon={lambda_recon}  λ_sparse={lambda_sparse}  "
+          f"λ_phys={lambda_phys}  ε={epsilon_w}W")
 
     X_tr, Y_tr = create_sequences(data_dict['train'], WIN)
     X_va, Y_va = create_sequences(data_dict['val'],   WIN)
@@ -285,8 +336,9 @@ def train_pinn_lista_model(data_dict, save_dir,
     te_loader = torch.utils.data.DataLoader(
         MultiApplianceDataset(X_te, Y_te), batch_size=BATCH, shuffle=False, drop_last=False)
 
-    model = PINNLISTANILMModel(
-        signal_len=WIN, n_atoms=n_atoms, k_layers=k_layers,
+    model = PINNLISTALNNModel(
+        signal_len=WIN, hidden_size=hidden_size, dt=dt,
+        n_atoms=n_atoms, k_layers=k_layers,
         n_appliances=len(APPLIANCES)
     ).to(device)
 
@@ -461,12 +513,13 @@ def train_pinn_lista_model(data_dict, save_dir,
 
     config = {
         'dataset': 'UKDALE',
-        'model': 'PINNLISTANILMModel',
-        'description': 'K-layer unrolled LISTA + PhysicsConsistency loss (Σp̂ ≤ P_agg + ε)',
+        'model': 'PINNLISTALNNModel',
+        'description': 'BasicLNN encoder (warm-start) → K-layer LISTA + PhysicsConsistency (Σp̂ ≤ P_agg + ε)',
         'loss': 'MSE + λ_recon·Recon + λ_sparse·L1 + λ_phys·Phys [+ BCE stage2]',
         'window_size': WIN,
         'model_params': {
-            'signal_len': WIN, 'n_atoms': n_atoms, 'k_layers': k_layers,
+            'signal_len': WIN, 'hidden_size': hidden_size, 'dt': dt,
+            'n_atoms': n_atoms, 'k_layers': k_layers,
             'n_appliances': len(APPLIANCES),
         },
         'train_params': {
@@ -570,6 +623,8 @@ if __name__ == "__main__":
     test_metrics, history = train_pinn_lista_model(
         data_dict,
         save_dir      = save_dir,
+        hidden_size   = HIDDEN_SIZE,
+        dt            = DT,
         n_atoms       = N_ATOMS,
         k_layers      = K_LAYERS,
         lambda_recon  = LAMBDA_RECON,
