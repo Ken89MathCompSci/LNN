@@ -446,7 +446,7 @@ def train_on_appliance(data_dict, appliance_name,
 
         # Reset early-stopping tracker at warmup boundary so BCE-phase models
         # are not compared against the much-lower MSE-only warmup losses.
-        if epoch == WARMUP_EPOCHS - 1:
+        if epoch == WARMUP_EPOCHS:
             best_val = float('inf')
             counter  = 0
 
