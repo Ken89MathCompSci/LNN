@@ -444,6 +444,12 @@ def train_on_appliance(data_dict, appliance_name,
               f"F1={metrics['f1']:.4f}  MAE={metrics['mae']:.2f}  "
               f"lr={optimizer.param_groups[0]['lr']:.2e}")
 
+        # Reset early-stopping tracker at warmup boundary so BCE-phase models
+        # are not compared against the much-lower MSE-only warmup losses.
+        if epoch == WARMUP_EPOCHS - 1:
+            best_val = float('inf')
+            counter  = 0
+
         if avg_va < best_val:
             best_val   = avg_va
             best_state = {k: v.clone() for k, v in model.state_dict().items()}
