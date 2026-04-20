@@ -1,5 +1,5 @@
 """
-LISTA + HMM + Edge Detection for NILM — REDD specific splits.
+LISTA + HMM + Edge Detection for NILM — UKDALE specific splits.
 
 Pipeline per appliance:
   1. CUSUM change-point detection on mains windows → edge-density scalar
@@ -59,8 +59,8 @@ LAMBDA_RECON  = 0.1
 LAMBDA_SPARSE = 0.01
 WARMUP_EPOCHS = 15
 
-CUSUM_THRESHOLD = 50.0   # Watts — change magnitude to flag as an edge
-CUSUM_DRIFT     =  5.0   # allowance before accumulator trips
+CUSUM_THRESHOLD = 50.0
+CUSUM_DRIFT     =  5.0
 
 APPLIANCES = ['dish washer', 'fridge', 'microwave', 'washer dryer']
 
@@ -72,7 +72,7 @@ THRESHOLDS = {
 }
 
 BCE_LAMBDA = {'dish washer': 0.3, 'fridge': 0.5, 'microwave': 2.0, 'washer dryer': 2.0}
-BCE_ALPHA  = {'dish washer': 1.5, 'fridge': 0.03, 'microwave': 8.0, 'washer dryer': 0.05}
+BCE_ALPHA  = {'dish washer': 1.0, 'fridge': 1.5, 'microwave': 10.0, 'washer dryer': 8.0}
 
 CONTEXT_DIM = N_HMM_STATES + 1   # [p_off, p_on, edge_density]
 
@@ -84,14 +84,11 @@ CONTEXT_DIM = N_HMM_STATES + 1   # [p_off, p_on, edge_density]
 def cusum_edge_detection(signal: np.ndarray,
                           threshold: float = CUSUM_THRESHOLD,
                           drift: float     = CUSUM_DRIFT) -> np.ndarray:
-    """
-    CUSUM on first differences.  Returns a float32 binary array with 1.0
-    wherever a change-point is declared (accumulators reset after each event).
-    """
+    """CUSUM on first differences. Returns binary float32 edge array."""
     edges = np.zeros(len(signal), dtype=np.float32)
     s_pos, s_neg = 0.0, 0.0
     for i in range(1, len(signal)):
-        diff = float(signal[i]) - float(signal[i - 1])
+        diff  = float(signal[i]) - float(signal[i - 1])
         s_pos = max(0.0, s_pos + diff  - drift)
         s_neg = max(0.0, s_neg - diff  - drift)
         if s_pos > threshold or s_neg > threshold:
@@ -106,30 +103,25 @@ def cusum_edge_detection(signal: np.ndarray,
 
 def train_appliance_hmm(app_power: np.ndarray,
                          n_states: int = N_HMM_STATES) -> "GaussianHMM":
-    """
-    Fit a diagonal-covariance GaussianHMM on the training appliance
-    power sequence.  State 0 ≡ OFF (lower mean), state 1 ≡ ON.
-    """
+    """Fit diagonal GaussianHMM; state 0 = OFF (lower mean), state 1 = ON."""
     hmm = GaussianHMM(n_components=n_states, covariance_type='diag',
                       n_iter=200, random_state=42)
-    X = app_power.reshape(-1, 1).astype(np.float64)
-    hmm.fit(X)
+    hmm.fit(app_power.reshape(-1, 1).astype(np.float64))
 
-    # Sort states so that state 0 = lower mean (OFF)
     means = hmm.means_.flatten()
     if means[0] > means[1]:
         order = [1, 0]
-        hmm.means_      = hmm.means_[order]
-        hmm.covars_     = hmm.covars_[order]
-        hmm.startprob_  = hmm.startprob_[order]
-        hmm.transmat_   = hmm.transmat_[order][:, order]
+        hmm.means_     = hmm.means_[order]
+        hmm.covars_    = hmm.covars_[order]
+        hmm.startprob_ = hmm.startprob_[order]
+        hmm.transmat_  = hmm.transmat_[order][:, order]
     return hmm
 
 
 def compute_hmm_posteriors(hmm_model, app_windows: np.ndarray) -> np.ndarray:
     """
     app_windows : (N, WIN)  raw appliance power
-    Returns     : (N, n_states) posterior probability at window midpoint
+    Returns     : (N, n_states) posterior at window midpoint
     """
     mid      = WIN // 2
     n_states = hmm_model.n_components
@@ -138,7 +130,7 @@ def compute_hmm_posteriors(hmm_model, app_windows: np.ndarray) -> np.ndarray:
     for seq in app_windows:
         try:
             probs = hmm_model.predict_proba(
-                seq.reshape(-1, 1).astype(np.float64))   # (WIN, n_states)
+                seq.reshape(-1, 1).astype(np.float64))
             posts.append(probs[mid].astype(np.float32))
         except Exception:
             posts.append(uniform.copy())
@@ -149,21 +141,17 @@ def build_context(raw_mains_windows: np.ndarray,
                   raw_app_windows:   np.ndarray,
                   hmm_model) -> np.ndarray:
     """
-    Builds context = [hmm_posterior(2), edge_density(1)]
-
-    raw_mains_windows : (N, WIN) — used for CUSUM (Watts scale)
-    raw_app_windows   : (N, WIN) — used for HMM posteriors
-    Returns           : (N, CONTEXT_DIM)
+    Returns (N, CONTEXT_DIM) = [hmm_posterior(2), edge_density(1)].
+    Both inputs must be in raw Watts (unscaled).
     """
-    hmm_posts     = compute_hmm_posteriors(hmm_model, raw_app_windows)  # (N, 2)
+    hmm_posts    = compute_hmm_posteriors(hmm_model, raw_app_windows)
 
-    N             = len(raw_mains_windows)
-    edge_density  = np.zeros((N, 1), dtype=np.float32)
+    N            = len(raw_mains_windows)
+    edge_density = np.zeros((N, 1), dtype=np.float32)
     for i, win in enumerate(raw_mains_windows):
-        edges             = cusum_edge_detection(win)
-        edge_density[i, 0] = float(edges.mean())
+        edge_density[i, 0] = float(cusum_edge_detection(win).mean())
 
-    return np.concatenate([hmm_posts, edge_density], axis=1)  # (N, 3)
+    return np.concatenate([hmm_posts, edge_density], axis=1)
 
 
 # ---------------------------------------------------------------------------
@@ -206,28 +194,19 @@ class LISTAHMMNILMModel(nn.Module):
         self.context_dim = context_dim
 
         self.hmm_proj   = nn.Linear(context_dim, n_atoms)
-
-        self.layers = nn.ModuleList([
+        self.layers     = nn.ModuleList([
             LISTALayer(signal_len, n_atoms) for _ in range(k_layers)
         ])
-        self.D = nn.Parameter(torch.randn(n_atoms, signal_len) * 0.01)
-
+        self.D          = nn.Parameter(torch.randn(n_atoms, signal_len) * 0.01)
         self.head_lista = nn.Linear(n_atoms, 1)
         self.head_hmm   = nn.Linear(context_dim, 1)
         self.gate_net   = nn.Linear(n_atoms + context_dim, 1)
 
     def forward(self, y: torch.Tensor, context: torch.Tensor):
-        """
-        y       : (batch, WIN) or (batch, WIN, 1)
-        context : (batch, context_dim)
-        """
         if y.dim() == 3:
             y = y.squeeze(-1)
 
-        # HMM-warm-started x^(0)
         x = torch.tanh(self.hmm_proj(context))
-
-        # LISTA refinement
         for layer in self.layers:
             x = layer(y, x)
 
@@ -236,8 +215,7 @@ class LISTAHMMNILMModel(nn.Module):
         gate        = torch.sigmoid(
             self.gate_net(torch.cat([x, context], dim=1))
         )
-        power = gate * lista_power + (1.0 - gate) * hmm_power
-        return power, x
+        return gate * lista_power + (1.0 - gate) * hmm_power, x
 
     def reconstruct(self, x: torch.Tensor) -> torch.Tensor:
         return x @ self.D
@@ -247,7 +225,7 @@ class LISTAHMMNILMModel(nn.Module):
 # Dataset
 # ---------------------------------------------------------------------------
 
-class REDDHMMDataset(torch.utils.data.Dataset):
+class UKDALEHMMDataset(torch.utils.data.Dataset):
     def __init__(self, X, context, y):
         self.X       = torch.FloatTensor(X)
         self.context = torch.FloatTensor(context)
@@ -264,13 +242,13 @@ class REDDHMMDataset(torch.utils.data.Dataset):
 # Data helpers
 # ---------------------------------------------------------------------------
 
-def load_redd_specific_splits():
-    print("Loading REDD data with specific splits...")
-    with open('data/redd/train_small.pkl', 'rb') as f:
+def load_ukdale_specific_splits():
+    print("Loading UKDALE data with specific splits...")
+    with open('data/ukdale/train_small.pkl', 'rb') as f:
         train_data = pickle.load(f)[0]
-    with open('data/redd/val_small.pkl', 'rb') as f:
+    with open('data/ukdale/val_small.pkl', 'rb') as f:
         val_data = pickle.load(f)[0]
-    with open('data/redd/test_small.pkl', 'rb') as f:
+    with open('data/ukdale/test_small.pkl', 'rb') as f:
         test_data = pickle.load(f)[0]
 
     print(f"Train date range: {train_data.index.min()} to {train_data.index.max()}")
@@ -281,7 +259,6 @@ def load_redd_specific_splits():
 
 
 def create_sequences(data, appliance_name, window_size=WIN):
-    """Returns (X_mains, y_midpoint, app_windows)."""
     mains    = data['main'].values
     app_vals = data[appliance_name].values
     X, y, app_wins = [], [], []
@@ -305,7 +282,7 @@ def train_on_appliance(data_dict, appliance_name,
                        epochs=EPOCHS, lr=LR, patience=PATIENCE,
                        lambda_recon=LAMBDA_RECON,
                        lambda_sparse=LAMBDA_SPARSE,
-                       save_dir='models/lista_hmm_edge_redd'):
+                       save_dir='models/lista_hmm_edge_ukdale'):
     assert HMM_AVAILABLE, "hmmlearn is required — pip install hmmlearn"
     os.makedirs(save_dir, exist_ok=True)
     device     = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -318,17 +295,14 @@ def train_on_appliance(data_dict, appliance_name,
           f"λ_recon={lambda_recon}  λ_sparse={lambda_sparse}  "
           f"λ_bce={bce_lambda}  α_bce={bce_alpha}  warmup={WARMUP_EPOCHS}")
 
-    # --- Raw sequences (needed for HMM) ---
     X_tr_raw, y_tr_raw, app_tr = create_sequences(data_dict['train'], appliance_name)
     X_va_raw, y_va_raw, app_va = create_sequences(data_dict['val'],   appliance_name)
     X_te_raw, y_te_raw, app_te = create_sequences(data_dict['test'],  appliance_name)
 
-    # --- Train HMM on training appliance power ---
     print(f"  Training HMM on {len(app_tr)} windows...")
     hmm_model = train_appliance_hmm(app_tr.flatten())
     print(f"  HMM means (OFF/ON): {hmm_model.means_.flatten().tolist()}")
 
-    # --- Build context vectors (before scaling, on raw Watts) ---
     mains_tr_raw = X_tr_raw.squeeze(-1)
     mains_va_raw = X_va_raw.squeeze(-1)
     mains_te_raw = X_te_raw.squeeze(-1)
@@ -339,7 +313,6 @@ def train_on_appliance(data_dict, appliance_name,
     ctx_te = build_context(mains_te_raw, app_te, hmm_model)
     print(f"  Context shape: {ctx_tr.shape}")
 
-    # --- Scale mains and appliance power ---
     x_scaler = MinMaxScaler()
     y_scaler = MinMaxScaler()
 
@@ -356,11 +329,11 @@ def train_on_appliance(data_dict, appliance_name,
     print(f"  Train: {X_tr.shape}  Val: {X_va.shape}  Test: {X_te.shape}")
 
     tr_loader = torch.utils.data.DataLoader(
-        REDDHMMDataset(X_tr, ctx_tr, y_tr), batch_size=BATCH, shuffle=True,  drop_last=False)
+        UKDALEHMMDataset(X_tr, ctx_tr, y_tr), batch_size=BATCH, shuffle=True,  drop_last=False)
     va_loader = torch.utils.data.DataLoader(
-        REDDHMMDataset(X_va, ctx_va, y_va), batch_size=BATCH, shuffle=False, drop_last=False)
+        UKDALEHMMDataset(X_va, ctx_va, y_va), batch_size=BATCH, shuffle=False, drop_last=False)
     te_loader = torch.utils.data.DataLoader(
-        REDDHMMDataset(X_te, ctx_te, y_te), batch_size=BATCH, shuffle=False, drop_last=False)
+        UKDALEHMMDataset(X_te, ctx_te, y_te), batch_size=BATCH, shuffle=False, drop_last=False)
 
     model = LISTAHMMNILMModel(
         signal_len=WIN, n_atoms=n_atoms, k_layers=k_layers, context_dim=CONTEXT_DIM
@@ -373,24 +346,23 @@ def train_on_appliance(data_dict, appliance_name,
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=8, min_lr=1e-5)
 
-    history      = {'train_loss': [], 'val_loss': [], 'val_metrics': []}
-    best_val     = float('inf')
-    best_state   = None
-    counter      = 0
+    history    = {'train_loss': [], 'val_loss': [], 'val_metrics': []}
+    best_val   = float('inf')
+    best_state = None
+    counter    = 0
 
     def _compute_loss(power, x, xb, yb, epoch):
         mse_loss    = F.mse_loss(power, yb)
-        y_flat      = xb.squeeze(-1)
-        recon_loss  = F.mse_loss(model.reconstruct(x), y_flat)
+        recon_loss  = F.mse_loss(model.reconstruct(x), xb.squeeze(-1))
         sparse_loss = x.abs().mean()
         if epoch < WARMUP_EPOCHS:
             return mse_loss + lambda_recon * recon_loss + lambda_sparse * sparse_loss
-        pred_prob  = torch.sigmoid(power / (thr_scaled + 1e-8))
-        y_bin      = (yb > thr_scaled).float()
-        w          = torch.where(y_bin == 1,
-                                 torch.full_like(y_bin, bce_alpha),
-                                 torch.ones_like(y_bin))
-        bce_loss   = F.binary_cross_entropy(
+        pred_prob = torch.sigmoid(power / (thr_scaled + 1e-8))
+        y_bin     = (yb > thr_scaled).float()
+        w         = torch.where(y_bin == 1,
+                                torch.full_like(y_bin, bce_alpha),
+                                torch.ones_like(y_bin))
+        bce_loss  = F.binary_cross_entropy(
             pred_prob.clamp(1e-7, 1 - 1e-7), y_bin, weight=w)
         return (mse_loss
                 + lambda_recon  * recon_loss
@@ -456,7 +428,7 @@ def train_on_appliance(data_dict, appliance_name,
                  'appliance': appliance_name},
                 metrics,
                 os.path.join(save_dir,
-                    f"lista_hmm_edge_redd_{appliance_name.replace(' ', '_')}_best.pth")
+                    f"lista_hmm_edge_ukdale_{appliance_name.replace(' ', '_')}_best.pth")
             )
         else:
             counter += 1
@@ -491,7 +463,7 @@ def train_on_appliance(data_dict, appliance_name,
 
     config = {
         'appliance':  appliance_name,
-        'dataset':    'REDD',
+        'dataset':    'UKDALE',
         'model':      'LISTAHMMNILMModel',
         'description': ('K-layer LISTA warm-started from GaussianHMM posterior + '
                         'CUSUM edge density; gated blend with HMM direct head'),
@@ -518,7 +490,7 @@ def train_on_appliance(data_dict, appliance_name,
         },
     }
     with open(os.path.join(save_dir,
-              f'lista_hmm_edge_redd_{appliance_name.replace(" ", "_")}_history.json'),
+              f'lista_hmm_edge_ukdale_{appliance_name.replace(" ", "_")}_history.json'),
               'w', encoding='utf-8') as f:
         json.dump(config, f, indent=4)
 
@@ -575,7 +547,7 @@ def _plot_results(history, test_metrics, appliance_name, save_dir):
     plt.tight_layout()
     plt.savefig(
         os.path.join(save_dir,
-            f"lista_hmm_edge_redd_{appliance_name.replace(' ', '_')}_metrics.png"),
+            f"lista_hmm_edge_ukdale_{appliance_name.replace(' ', '_')}_metrics.png"),
         dpi=150, bbox_inches='tight')
     plt.close()
 
@@ -588,9 +560,9 @@ def test_on_all_appliances(n_atoms=N_ATOMS, k_layers=K_LAYERS,
                            epochs=EPOCHS, lr=LR, patience=PATIENCE,
                            lambda_recon=LAMBDA_RECON,
                            lambda_sparse=LAMBDA_SPARSE):
-    data_dict  = load_redd_specific_splits()
-    timestamp  = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base_dir   = f"models/lista_hmm_edge_redd_specific_test_{timestamp}"
+    data_dict   = load_ukdale_specific_splits()
+    timestamp   = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_dir    = f"models/lista_hmm_edge_ukdale_specific_test_{timestamp}"
     all_results = {}
 
     for appliance_name in APPLIANCES:
@@ -617,7 +589,7 @@ def test_on_all_appliances(n_atoms=N_ATOMS, k_layers=K_LAYERS,
             all_results[appliance_name] = {
                 'model_path': os.path.join(
                     app_dir,
-                    f"lista_hmm_edge_redd_{appliance_name.replace(' ', '_')}_best.pth"),
+                    f"lista_hmm_edge_ukdale_{appliance_name.replace(' ', '_')}_best.pth"),
                 'final_metrics': {k: float(v) for k, v in test_metrics.items()},
             }
         except Exception as e:
@@ -626,13 +598,13 @@ def test_on_all_appliances(n_atoms=N_ATOMS, k_layers=K_LAYERS,
 
     summary = {
         'timestamp': timestamp,
-        'dataset':   'REDD',
+        'dataset':   'UKDALE',
         'model':     'LISTAHMMNILMModel',
         'description': 'LISTA warm-started from HMM posterior + CUSUM edge density',
         'dataset_splits': {
-            'training':   {'house': 1, 'date': '2011-04-21'},
-            'validation': {'house': 1, 'date': '2011-04-22'},
-            'testing':    {'house': 1, 'date': '2011-04-23'},
+            'training':   {'house': 1, 'date': '2013-04-12'},
+            'validation': {'house': 1, 'date': '2013-04-13'},
+            'testing':    {'house': 1, 'date': '2013-04-14'},
         },
         'window_size':  WIN,
         'model_params': {'n_atoms': n_atoms, 'k_layers': k_layers,
@@ -649,7 +621,7 @@ def test_on_all_appliances(n_atoms=N_ATOMS, k_layers=K_LAYERS,
     with open(os.path.join(base_dir, 'summary.json'), 'w', encoding='utf-8') as f:
         json.dump(summary, f, indent=4)
 
-    print(f"\nLISTA-HMM-Edge REDD testing complete. Results in {base_dir}\n")
+    print(f"\nLISTA-HMM-Edge UKDALE testing complete. Results in {base_dir}\n")
     print(f"{'Appliance':<15} {'F1':>8} {'Precision':>10} {'Recall':>8} "
           f"{'MAE':>8} {'SAE':>8}")
     print("-" * 65)
@@ -671,9 +643,9 @@ if __name__ == "__main__":
         print("Install hmmlearn first: pip install hmmlearn")
         sys.exit(1)
 
-    for f in ['data/redd/train_small.pkl',
-              'data/redd/val_small.pkl',
-              'data/redd/test_small.pkl']:
+    for f in ['data/ukdale/train_small.pkl',
+              'data/ukdale/val_small.pkl',
+              'data/ukdale/test_small.pkl']:
         if not os.path.exists(f):
             print(f"Error: {f} not found!")
             sys.exit(1)
@@ -684,7 +656,7 @@ if __name__ == "__main__":
         lambda_recon=LAMBDA_RECON, lambda_sparse=LAMBDA_SPARSE,
     )
 
-    print(f"\nSummary — LISTA-HMM-Edge on REDD:")
+    print(f"\nSummary — LISTA-HMM-Edge on UKDALE:")
     print(f"Total appliances tested: {len(results)}")
     for appliance, result in results.items():
         m = result['final_metrics']
