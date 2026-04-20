@@ -72,7 +72,7 @@ THRESHOLDS = {
 }
 
 BCE_LAMBDA = {'dish washer': 0.3, 'fridge': 0.5, 'microwave': 2.0, 'washer dryer': 2.0}
-BCE_ALPHA  = {'dish washer': 1.0, 'fridge': 1.5, 'microwave': 10.0, 'washer dryer': 8.0}
+BCE_ALPHA  = {'dish washer': 2.0, 'fridge': 0.3, 'microwave': 20.0, 'washer dryer': 8.0}
 
 CONTEXT_DIM = N_HMM_STATES + 1   # [p_off, p_on, edge_density]
 
