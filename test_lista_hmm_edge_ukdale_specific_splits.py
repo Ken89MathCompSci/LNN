@@ -348,6 +348,7 @@ def train_on_appliance(data_dict, appliance_name,
 
     history    = {'train_loss': [], 'val_loss': [], 'val_metrics': []}
     best_val   = float('inf')
+    best_val_f1 = -1.0
     best_state = None
     counter    = 0
 
@@ -418,14 +419,23 @@ def train_on_appliance(data_dict, appliance_name,
 
         # Reset early-stopping tracker at warmup boundary so BCE-phase models
         # are not compared against the much-lower MSE-only warmup losses.
+        # Also switch selection criterion: val_loss during warmup, val F1 after.
         if epoch == WARMUP_EPOCHS:
-            best_val = float('inf')
-            counter  = 0
+            best_val    = float('inf')
+            best_val_f1 = -1.0
+            counter     = 0
 
-        if avg_va < best_val:
-            best_val   = avg_va
-            best_state = {k: v.clone() for k, v in model.state_dict().items()}
-            counter    = 0
+        val_f1 = metrics['f1']
+        if epoch < WARMUP_EPOCHS:
+            improved = avg_va < best_val
+        else:
+            improved = val_f1 > best_val_f1
+
+        if improved:
+            best_val    = avg_va
+            best_val_f1 = val_f1
+            best_state  = {k: v.clone() for k, v in model.state_dict().items()}
+            counter     = 0
             save_model(
                 model,
                 {'signal_len': WIN, 'n_atoms': n_atoms, 'k_layers': k_layers,
