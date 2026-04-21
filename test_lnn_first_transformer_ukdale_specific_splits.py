@@ -82,14 +82,14 @@ BCE_LAMBDA = {
     'dish washer':  0.3,
     'fridge':       0.5,
     'microwave':    2.0,
-    'washer dryer': 2.0,
+    'washer dryer': 0.5,   # reduced from 2.0 — BCE_LAMBDA×ALPHA=2×8 caused gradient explosion
 }
 
 # α_bce = weight for positive (ON) class in weighted BCE; tune if recall is low
 BCE_ALPHA = {
     'dish washer':  10.0,
     'fridge':        1.5,
-    'microwave':    10.0,
+    'microwave':    20.0,   # raised from 10.0 — R=0.28 too low, need to push recall
     'washer dryer':  8.0,
 }
 
