@@ -92,7 +92,7 @@ BCE_LAMBDA = {
 BCE_ALPHA = {
     'dish washer':  10.0,
     'fridge':        1.5,
-    'microwave':    10.0,
+    'microwave':     5.0,   # reduced from 10 — α=10 with λ=0.5 still collapsed to always-ON (val F1 stuck at 0.0132)
     'washer dryer':  8.0,
 }
 
