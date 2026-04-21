@@ -84,7 +84,7 @@ THRESHOLDS = {
 BCE_LAMBDA = {
     'dish washer':  0.3,
     'fridge':       0.5,
-    'microwave':    2.0,
+    'microwave':    0.5,   # reduced from 2.0 — local attn changes grad flow; 2.0×10=20× caused same explosion as global-attn run
     'washer dryer': 0.5,
 }
 
