@@ -70,15 +70,15 @@ THRESHOLDS = {
 BCE_LAMBDA = {
     'dish washer':  0.3,
     'fridge':       0.5,
-    'microwave':    2.0,
+    'microwave':    0.3,
     'washer dryer': 0.5,
 }
 
 BCE_ALPHA = {
     'dish washer':  10.0,
-    'fridge':        1.5,
-    'microwave':    10.0,
-    'washer dryer':  8.0,
+    'fridge':        0.5,
+    'microwave':     4.0,
+    'washer dryer':  3.0,
 }
 
 SAVE_DIR = os.path.join('results', 'lnn_basic_ukdale')

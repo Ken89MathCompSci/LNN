@@ -22,7 +22,13 @@
       "Bash(py -c \"from einops import rearrange; print\\('einops ok'\\)\")",
       "Bash(python -c ' *)",
       "Bash(python3 -c ' *)",
-      "Bash(/c/Users/MathK/AppData/Local/Programs/Python/Python313/python.exe -c ' *)"
+      "Bash(/c/Users/MathK/AppData/Local/Programs/Python/Python313/python.exe -c ' *)",
+      "Bash(git reset *)",
+      "Bash(grep -q \"AMPds2.h5\" .gitignore)",
+      "Bash(echo \"data/AMPds2.h5\")",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)"
     ]
   }
 }
