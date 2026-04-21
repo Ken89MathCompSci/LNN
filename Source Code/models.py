@@ -1960,6 +1960,90 @@ class HybridTransformerLNNv5Model(nn.Module):
         return self.fc(self.dropout(h))
 
 
+# ── LNN-First Transformer (physics frontend → global context) ─────────────────
+
+class LNNFirstTransformerModel(nn.Module):
+    """
+    LNN-First Hybrid for NILM.
+
+    The LNN acts as a physics-aware frontend: it unrolls a LiquidODECell
+    over every raw input timestep, learning per-channel time constants (tau)
+    that capture transient dynamics before any attention is applied.
+    The resulting sequence of hidden states is then processed by a standard
+    Transformer Encoder for long-range context modelling.
+
+    Architecture:
+      Input proj  : Linear(input_size → hidden)
+      LNN frontend: LiquidODECell unrolled over seq_len  → (B, T, hidden)
+      LNN dropout : Dropout(dropout)
+      Transformer : num_encoder_layers × TransformerEncoderLayer(hidden, nheads)
+      Pool        : mean (default) or max over T
+      FC          : Linear(hidden → output_size)
+    """
+
+    def __init__(self, input_size: int = 1, hidden_size: int = 256,
+                 output_size: int = 1, dt: float = 0.1,
+                 num_encoder_layers: int = 2, num_heads: int = 4,
+                 dropout: float = 0.1, pool: str = 'mean'):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.pool = pool
+
+        # Project raw signal to hidden dim before LNN
+        self.input_proj = nn.Sequential(
+            nn.Linear(input_size, hidden_size),
+            nn.LayerNorm(hidden_size),
+            nn.GELU(),
+        )
+
+        # LNN physics frontend
+        self.lnn_cell = LiquidODECell(hidden_size, hidden_size, dt=dt)
+        self.lnn_drop = nn.Dropout(dropout)
+
+        # Transformer encoder for global context
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_size,
+            nhead=num_heads,
+            dim_feedforward=hidden_size * 4,
+            dropout=dropout,
+            batch_first=True,
+            activation='gelu',
+        )
+        self.transformer = nn.TransformerEncoder(enc_layer,
+                                                  num_layers=num_encoder_layers)
+
+        self.out_drop = nn.Dropout(dropout)
+        self.fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, seq_len, input_size)
+        B, T, _ = x.size()
+
+        # Project to hidden dim
+        x = self.input_proj(x)                          # (B, T, H)
+
+        # LNN frontend — unroll cell over time
+        h = torch.zeros(B, self.hidden_size, device=x.device)
+        states = []
+        for t in range(T):
+            h = self.lnn_cell(x[:, t, :], h)
+            states.append(h)
+        lnn_out = self.lnn_drop(
+            torch.stack(states, dim=1)                  # (B, T, H)
+        )
+
+        # Transformer encoder
+        ctx = self.transformer(lnn_out)                 # (B, T, H)
+
+        # Pool over sequence
+        if self.pool == 'max':
+            pooled = ctx.max(dim=1).values
+        else:
+            pooled = ctx.mean(dim=1)                    # (B, H)
+
+        return self.fc(self.out_drop(pooled))           # (B, output_size)
+
+
 # ── Selective SSM Cell (S6-inspired) ──────────────────────────────────────────
 
 class SelectiveSSMCell(nn.Module):
