@@ -2044,6 +2044,94 @@ class LNNFirstTransformerModel(nn.Module):
         return self.fc(self.out_drop(pooled))           # (B, output_size)
 
 
+# ── LNN-First Transformer with Sliding Window (Local) Attention ───────────────
+
+class LNNLocalTransformerModel(nn.Module):
+    """
+    LNN-First Hybrid for NILM with banded (local) self-attention.
+
+    Identical to LNNFirstTransformerModel but each Transformer position t
+    can only attend to the window [t−attn_window, t+attn_window].  The
+    LNN recurrent state still carries global history; the Transformer is
+    restricted to local context so transient ON/OFF edges cannot bleed
+    across distant timesteps.
+
+    Architecture:
+      Input proj  : Linear(input_size → hidden)
+      LNN frontend: LiquidODECell unrolled over seq_len  → (B, T, hidden)
+      LNN dropout : Dropout(dropout)
+      Transformer : num_encoder_layers × TransformerEncoderLayer  (local mask)
+      Pool        : mean (default) or max over T
+      FC          : Linear(hidden → output_size)
+    """
+
+    def __init__(self, input_size: int = 1, hidden_size: int = 256,
+                 output_size: int = 1, dt: float = 0.1,
+                 num_encoder_layers: int = 2, num_heads: int = 4,
+                 dropout: float = 0.1, pool: str = 'mean',
+                 seq_len: int = 100, attn_window: int = 20):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.pool = pool
+
+        self.input_proj = nn.Sequential(
+            nn.Linear(input_size, hidden_size),
+            nn.LayerNorm(hidden_size),
+            nn.GELU(),
+        )
+
+        self.lnn_cell = LiquidODECell(hidden_size, hidden_size, dt=dt)
+        self.lnn_drop = nn.Dropout(dropout)
+
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_size,
+            nhead=num_heads,
+            dim_feedforward=hidden_size * 4,
+            dropout=dropout,
+            batch_first=True,
+            activation='gelu',
+        )
+        self.transformer = nn.TransformerEncoder(enc_layer,
+                                                  num_layers=num_encoder_layers)
+
+        self.out_drop = nn.Dropout(dropout)
+        self.fc = nn.Linear(hidden_size, output_size)
+
+        # Pre-compute banded mask: positions outside [t-w, t+w] are masked
+        if attn_window > 0:
+            mask = torch.full((seq_len, seq_len), float('-inf'))
+            for i in range(seq_len):
+                s = max(0, i - attn_window)
+                e = min(seq_len, i + attn_window + 1)
+                mask[i, s:e] = 0.0
+            self.register_buffer('attn_mask', mask)
+        else:
+            self.attn_mask = None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, T, _ = x.size()
+
+        x = self.input_proj(x)                          # (B, T, H)
+
+        h = torch.zeros(B, self.hidden_size, device=x.device)
+        states = []
+        for t in range(T):
+            h = self.lnn_cell(x[:, t, :], h)
+            states.append(h)
+        lnn_out = self.lnn_drop(
+            torch.stack(states, dim=1)                  # (B, T, H)
+        )
+
+        ctx = self.transformer(lnn_out, mask=self.attn_mask)   # (B, T, H)
+
+        if self.pool == 'max':
+            pooled = ctx.max(dim=1).values
+        else:
+            pooled = ctx.mean(dim=1)                    # (B, H)
+
+        return self.fc(self.out_drop(pooled))           # (B, output_size)
+
+
 # ── Selective SSM Cell (S6-inspired) ──────────────────────────────────────────
 
 class SelectiveSSMCell(nn.Module):
