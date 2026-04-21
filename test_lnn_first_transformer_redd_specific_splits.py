@@ -80,17 +80,19 @@ THRESHOLDS = {
 # λ_bce scales the BCE term relative to MSE
 BCE_LAMBDA = {
     'dish washer':  0.3,
-    'fridge':       0.5,
-    'microwave':    2.0,
-    'washer dryer': 2.0,
+    'fridge':       0.3,   # reduced from 0.5 — helps stability
+    'microwave':    0.3,   # reduced from 2.0 — 2.0 caused gradient explosion (train~3.7)
+    'washer dryer': 0.5,   # reduced from 2.0 — stabilise BCE phase
 }
 
-# α_bce = weight for positive (ON) class in weighted BCE; tuned for REDD
+# α_bce = weight for positive (ON) class in weighted BCE
+# Note: LISTA+HMM+Edge REDD values (fridge=0.03, washer dryer=0.05) do NOT port
+# to this architecture — they collapse to always-OFF during the BCE phase.
 BCE_ALPHA = {
     'dish washer':  1.5,
-    'fridge':       0.03,
-    'microwave':    8.0,
-    'washer dryer': 0.05,
+    'fridge':       1.5,   # raised from 0.03 — 0.03 caused always-OFF (R=0.023)
+    'microwave':    4.0,   # reduced from 8.0 — combined with λ=0.3 for stability
+    'washer dryer': 5.0,   # raised from 0.05 — 0.05 caused always-OFF (F1=0.000)
 }
 
 # Bursty appliances benefit from max-pool to capture brief spike activations

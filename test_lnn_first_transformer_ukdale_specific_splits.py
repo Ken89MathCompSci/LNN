@@ -89,7 +89,7 @@ BCE_LAMBDA = {
 BCE_ALPHA = {
     'dish washer':  10.0,
     'fridge':        1.5,
-    'microwave':    20.0,   # raised from 10.0 — R=0.28 too low, need to push recall
+    'microwave':    10.0,   # α=20 caused always-OFF collapse; α=10 gave F1=0.433, P=0.937
     'washer dryer':  8.0,
 }
 
