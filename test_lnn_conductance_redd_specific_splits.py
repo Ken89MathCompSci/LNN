@@ -1,124 +1,61 @@
-"""
-Conductance-based LTC — REDD specific splits
-=============================================
-ODE (Hasani et al. proper LTC equation):
-
-    τ(x) · dh/dt = -h + σ(W_A·x + U_A·h + b_A) · (E_rev - h)
-
-Discretised with Euler:
-    τ_eff = softplus(τ_base + W_τ·x)        input-dependent time constant
-    A_eff = σ(W_A·x + U_A·h + b_A)          conductance gate  (0 → 1)
-    h ← h + dt/τ_eff · (–h + A_eff·(E_rev – h))
-
-Key properties vs. basic LTC:
-  • E_rev acts as a self-regulating attractor — output bounded without hard clamp
-  • τ(x) adapts per-timestep: fast on spikes, slow on baselines
-  • Conductance gate suppresses irrelevant timesteps (fixes microwave collapse)
-
-Loss schedule / LR schedule / gradient clipping: identical to basic LNN scripts.
-
-Usage:
-    python test_lnn_conductance_redd_specific_splits.py --appliance microwave
-    python test_lnn_conductance_redd_specific_splits.py --plot
-"""
-
 import sys
 import os
-import time
-import argparse
-import json
-import pickle
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import matplotlib
-matplotlib.use('Agg')
+import numpy as np
 import matplotlib.pyplot as plt
+import json
+from datetime import datetime
 from tqdm import tqdm
+import pickle
+from sklearn.preprocessing import MinMaxScaler
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'Source Code'))
-from utils import calculate_nilm_metrics
 
-# ── Constants ──────────────────────────────────────────────────────────────────
-
-EPOCHS        = 80
-PATIENCE      = 20
-LR            = 1e-3
-BATCH         = 128
-WIN           = 100
-STRIDE        = 5
-WARMUP_EPOCHS = 15
-
-APPLIANCES = ['dish washer', 'fridge', 'microwave', 'washer dryer']
-APP_LABELS = ['Dish Washer', 'Fridge', 'Microwave', 'Washer Dryer']
-
-THRESHOLDS = {
-    'dish washer':  10.0,
-    'fridge':       10.0,
-    'microwave':    10.0,
-    'washer dryer': 10.0,
-}
-
-BCE_LAMBDA = {
-    'dish washer':  0.3,
-    'fridge':       0.3,
-    'microwave':    0.3,
-    'washer dryer': 0.5,
-}
-
-BCE_ALPHA = {
-    'dish washer':  1.5,
-    'fridge':       1.5,
-    'microwave':    4.0,
-    'washer dryer': 5.0,
-}
-
-SAVE_DIR = os.path.join('results', 'lnn_conductance_redd')
-COLOR    = '#8C564B'
+from utils import calculate_nilm_metrics, save_model
 
 
-# ── Conductance-based LTC layer ────────────────────────────────────────────────
+# ── Conductance-based LTC ──────────────────────────────────────────────────────
+#
+#   τ(x) · dh/dt = -h + σ(W_A·x + U_A·h + b_A) · (E_rev - h)
+#
+#   Euler step:
+#       τ   = softplus(τ_base + W_τ·x)      input-dependent time constant
+#       A   = σ(W_A·x + U_A·h + b_A)        conductance gate ∈ (0,1)
+#       h  ← h + dt/τ · (–h + A·(E_rev–h))
+#
+# Improvement over basic LTC:
+#   • E_rev acts as self-regulating attractor — no hard clamp needed
+#   • τ(x) shrinks on spikes, expands on flat baseline
+#   • conductance gate suppresses irrelevant timesteps
 
 class ConductanceLTCLayer(nn.Module):
-    """
-    τ(x)·dh/dt = -h + σ(W_A·x + U_A·h + b_A)·(E_rev - h)
-
-    All quantities that must be positive use softplus/sigmoid so there
-    is no need for a hard clamp on the hidden state.
-    """
-    def __init__(self, input_size: int, hidden_size: int, dt: float = 0.1):
+    def __init__(self, input_size, hidden_size, dt=0.1):
         super().__init__()
         self.hidden_size = hidden_size
         self.dt          = dt
+        self.W_A         = nn.Linear(input_size,  hidden_size)
+        self.U_A         = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.W_tau        = nn.Linear(input_size,  hidden_size, bias=False)
+        self.tau_base    = nn.Parameter(torch.ones(hidden_size))
+        self.E_rev       = nn.Parameter(torch.zeros(hidden_size))
 
-        # Conductance: A(x,h) = σ(W_A·x + U_A·h + b_A)
-        self.W_A = nn.Linear(input_size,  hidden_size)
-        self.U_A = nn.Linear(hidden_size, hidden_size, bias=False)
-
-        # Input-dependent time constant: τ(x) = softplus(τ_base + W_τ·x)
-        self.W_tau    = nn.Linear(input_size, hidden_size, bias=False)
-        self.tau_base = nn.Parameter(torch.ones(hidden_size))
-
-        # Learnable reversal potential (one per neuron)
-        self.E_rev = nn.Parameter(torch.zeros(hidden_size))
-
-    def forward(self, x: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
-        tau  = F.softplus(self.tau_base + self.W_tau(x))    # (B, H) > 0
-        A    = torch.sigmoid(self.W_A(x) + self.U_A(h))     # (B, H) ∈ (0,1)
-        dhdt = (-h + A * (self.E_rev - h)) / tau            # (B, H)
+    def forward(self, x, h):
+        tau  = F.softplus(self.tau_base + self.W_tau(x))
+        A    = torch.sigmoid(self.W_A(x) + self.U_A(h))
+        dhdt = (-h + A * (self.E_rev - h)) / tau
         return h + self.dt * dhdt
 
 
 class ConductanceLTCModel(nn.Module):
-    def __init__(self, input_size: int = 1, hidden_size: int = 256,
-                 output_size: int = 1, dt: float = 0.1):
+    def __init__(self, input_size=1, hidden_size=64, output_size=1, dt=0.1):
         super().__init__()
         self.hidden_size = hidden_size
-        self.cell = ConductanceLTCLayer(input_size, hidden_size, dt)
-        self.fc   = nn.Linear(hidden_size, output_size)
+        self.cell        = ConductanceLTCLayer(input_size, hidden_size, dt)
+        self.fc          = nn.Linear(hidden_size, output_size)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
         B, T, _ = x.shape
         h = torch.zeros(B, self.hidden_size, device=x.device)
         for t in range(T):
@@ -126,35 +63,9 @@ class ConductanceLTCModel(nn.Module):
         return self.fc(h)
 
 
-# ── Data ───────────────────────────────────────────────────────────────────────
+# ── Dataset ────────────────────────────────────────────────────────────────────
 
-def load_data():
-    print("Loading REDD data (specific splits)...")
-    splits = {}
-    for split in ('train', 'val', 'test'):
-        with open(f'data/redd/{split}_small.pkl', 'rb') as f:
-            splits[split] = pickle.load(f)[0]
-    print(f"  Train: {splits['train'].index.min()} → {splits['train'].index.max()}")
-    print(f"  Val  : {splits['val'].index.min()} → {splits['val'].index.max()}")
-    print(f"  Test : {splits['test'].index.min()} → {splits['test'].index.max()}")
-    print(f"  Columns: {list(splits['train'].columns)}")
-    return splits
-
-
-def create_sequences(data, appliance_name, window_size=WIN):
-    mains = data['main'].values
-    app   = data[appliance_name].values
-    X, y  = [], []
-    for i in range(0, len(mains) - window_size, STRIDE):
-        X.append(mains[i:i + window_size])
-        y.append(app[i + window_size // 2])
-    return (
-        np.array(X, dtype=np.float32).reshape(-1, window_size, 1),
-        np.array(y, dtype=np.float32).reshape(-1, 1),
-    )
-
-
-class NILMDataset(torch.utils.data.Dataset):
+class REDDDataset(torch.utils.data.Dataset):
     def __init__(self, X, y):
         self.X = torch.FloatTensor(X)
         self.y = torch.FloatTensor(y)
@@ -166,394 +77,383 @@ class NILMDataset(torch.utils.data.Dataset):
         return self.X[idx], self.y[idx]
 
 
-# ── Fast per-epoch metrics ─────────────────────────────────────────────────────
+def load_redd_specific_splits():
+    print("Loading REDD data with specific splits...")
 
-def _fast_metrics(y_true, y_pred, threshold):
-    y_true = y_true.flatten(); y_pred = y_pred.flatten()
-    mae   = float(np.mean(np.abs(y_true - y_pred)))
-    t_bin = y_true > threshold; p_bin = y_pred > threshold
-    tp = int(np.sum(t_bin & p_bin))
-    fp = int(np.sum(~t_bin & p_bin))
-    fn = int(np.sum(t_bin & ~p_bin))
-    pr = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-    rc = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-    f1 = 2 * pr * rc / (pr + rc) if (pr + rc) > 0 else 0.0
-    return {'mae': mae, 'f1': f1, 'precision': pr, 'recall': rc}
+    with open('data/redd/train_small.pkl', 'rb') as f:
+        train_data = pickle.load(f)[0]
+    with open('data/redd/val_small.pkl', 'rb') as f:
+        val_data = pickle.load(f)[0]
+    with open('data/redd/test_small.pkl', 'rb') as f:
+        test_data = pickle.load(f)[0]
+
+    print(f"Train data shape: {train_data.shape}")
+    print(f"Validation data shape: {val_data.shape}")
+    print(f"Test data shape: {test_data.shape}")
+    print(f"Train date range: {train_data.index.min()} to {train_data.index.max()}")
+    print(f"Val   date range: {val_data.index.min()} to {val_data.index.max()}")
+    print(f"Test  date range: {test_data.index.min()} to {test_data.index.max()}")
+    print(f"Available columns: {list(train_data.columns)}")
+
+    return {'train': train_data, 'val': val_data, 'test': test_data}
 
 
-# ── Training ───────────────────────────────────────────────────────────────────
+def create_sequences(data, window_size=100):
+    mains = data['main'].values
+    X = []
+    stride = 5
+    for i in range(0, len(mains) - window_size + 1, stride):
+        X.append(mains[i:i + window_size])
+    return np.array(X).reshape(-1, window_size, 1)
 
-def train_appliance(appliance_name, splits, device, epochs, hidden_size):
-    thr       = THRESHOLDS[appliance_name]
-    bce_lam   = BCE_LAMBDA[appliance_name]
-    bce_alpha = BCE_ALPHA[appliance_name]
 
-    print(f"\n{'='*60}")
-    print(f"  {appliance_name}  |  hidden={hidden_size}")
-    print(f"  λ_bce={bce_lam}  α_bce={bce_alpha}  warmup={WARMUP_EPOCHS}")
-    print(f"{'='*60}")
+def get_threshold_for_appliance(appliance_name):
+    return 0.5 if appliance_name == 'washer dryer' else 10.0
 
-    X_tr, y_tr = create_sequences(splits['train'], appliance_name)
-    X_va, y_va = create_sequences(splits['val'],   appliance_name)
-    X_te, y_te = create_sequences(splits['test'],  appliance_name)
 
-    from sklearn.preprocessing import MinMaxScaler
-    x_scaler = MinMaxScaler(); y_scaler = MinMaxScaler()
-    X_tr_n = x_scaler.fit_transform(X_tr.reshape(-1, 1)).reshape(X_tr.shape)
-    X_va_n = x_scaler.transform(X_va.reshape(-1, 1)).reshape(X_va.shape)
-    X_te_n = x_scaler.transform(X_te.reshape(-1, 1)).reshape(X_te.shape)
-    y_tr_n = y_scaler.fit_transform(y_tr)
-    y_va_n = y_scaler.transform(y_va)
-    y_te_n = y_scaler.transform(y_te)
-    thr_scaled = float((thr - y_scaler.data_min_[0]) / y_scaler.data_range_[0])
+def train_on_appliance(data_dict, appliance_name, window_size=100,
+                       hidden_size=64, dt=0.1,
+                       epochs=80, lr=0.001, patience=20,
+                       save_dir='models/conductance_lnn_redd_specific'):
+    os.makedirs(save_dir, exist_ok=True)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
 
-    print(f"  Train: {X_tr_n.shape}  Val: {X_va_n.shape}  Test: {X_te_n.shape}")
+    train_data = data_dict['train']
+    val_data   = data_dict['val']
+    test_data  = data_dict['test']
 
-    tr_loader = torch.utils.data.DataLoader(
-        NILMDataset(X_tr_n, y_tr_n), batch_size=BATCH, shuffle=True,  drop_last=False)
-    va_loader = torch.utils.data.DataLoader(
-        NILMDataset(X_va_n, y_va_n), batch_size=BATCH, shuffle=False, drop_last=False)
-    te_loader = torch.utils.data.DataLoader(
-        NILMDataset(X_te_n, y_te_n), batch_size=BATCH, shuffle=False, drop_last=False)
+    print(f"Creating sequences for {appliance_name}...")
+    X_train = create_sequences(train_data, window_size)
+    X_val   = create_sequences(val_data,   window_size)
+    X_test  = create_sequences(test_data,  window_size)
+
+    y_train = train_data[appliance_name].iloc[::5].values.reshape(-1, 1)[:len(X_train)]
+    y_val   = val_data[appliance_name].iloc[::5].values.reshape(-1, 1)[:len(X_val)]
+    y_test  = test_data[appliance_name].iloc[::5].values.reshape(-1, 1)[:len(X_test)]
+
+    x_scaler = MinMaxScaler()
+    y_scaler = MinMaxScaler()
+
+    X_train = x_scaler.fit_transform(X_train.reshape(-1, 1)).reshape(X_train.shape)
+    X_val   = x_scaler.transform(X_val.reshape(-1, 1)).reshape(X_val.shape)
+    X_test  = x_scaler.transform(X_test.reshape(-1, 1)).reshape(X_test.shape)
+
+    y_train = y_scaler.fit_transform(y_train)
+    y_val   = y_scaler.transform(y_val)
+    y_test  = y_scaler.transform(y_test)
+
+    print(f"Training sequences:   {X_train.shape} -> {y_train.shape}")
+    print(f"Validation sequences: {X_val.shape} -> {y_val.shape}")
+    print(f"Test sequences:       {X_test.shape} -> {y_test.shape}")
+
+    train_loader = torch.utils.data.DataLoader(
+        REDDDataset(X_train, y_train), batch_size=32, shuffle=True)
+    val_loader = torch.utils.data.DataLoader(
+        REDDDataset(X_val, y_val), batch_size=32, shuffle=False)
+    test_loader = torch.utils.data.DataLoader(
+        REDDDataset(X_test, y_test), batch_size=32, shuffle=False)
 
     model = ConductanceLTCModel(
-        input_size=1, hidden_size=hidden_size, output_size=1, dt=0.1
+        input_size=1,
+        hidden_size=hidden_size,
+        output_size=1,
+        dt=dt
     ).to(device)
-    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"  Parameters: {n_params:,}")
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=LR)
-    cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=max(1, epochs - WARMUP_EPOCHS), eta_min=1e-5)
+    criterion = torch.nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=3)
 
-    def _loss(out, yb, epoch):
-        mse = F.mse_loss(out, yb)
-        if epoch < WARMUP_EPOCHS:
-            return mse
-        prob  = torch.sigmoid(out / (thr_scaled + 1e-8))
-        y_bin = (yb > thr_scaled).float()
-        w     = torch.where(y_bin == 1,
-                            torch.full_like(y_bin, bce_alpha),
-                            torch.ones_like(y_bin))
-        bce   = F.binary_cross_entropy(prob.clamp(1e-7, 1 - 1e-7), y_bin, weight=w)
-        return mse + bce_lam * bce
+    history = {'train_loss': [], 'val_loss': [], 'val_metrics': []}
+    best_val_loss = float('inf')
+    best_state    = None
+    counter = 0
 
-    train_losses, val_losses = [], []
-    val_mae_h, val_f1_h, val_p_h, val_r_h, val_time_h = [], [], [], [], []
-
-    best_val    = float('inf')
-    best_val_f1 = -1.0
-    best_state  = None
-    no_improve  = 0
+    print(f"Starting ConductanceLTCModel training for {appliance_name}...")
 
     for epoch in range(epochs):
         model.train()
-        ep_loss = 0.0
-        bar = tqdm(tr_loader, desc=f"  Epoch {epoch+1}/{epochs}", leave=False)
-        for xb, yb in bar:
-            xb, yb = xb.to(device), yb.to(device)
+        train_loss = 0.0
+        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
+        for inputs, targets in progress_bar:
+            inputs, targets = inputs.to(device), targets.to(device)
             optimizer.zero_grad()
-            out  = model(xb)
-            loss = _loss(out, yb, epoch)
+            outputs = model(inputs)
+            loss = criterion(outputs, targets)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
-            ep_loss += loss.item()
-            bar.set_postfix({'loss': f'{loss.item():.5f}'})
-        avg_tr = ep_loss / len(tr_loader)
-        train_losses.append(avg_tr)
+            train_loss += loss.item()
+            progress_bar.set_postfix({'loss': loss.item()})
 
-        vt0 = time.time()
+        avg_train_loss = train_loss / len(train_loader)
+        history['train_loss'].append(avg_train_loss)
+
         model.eval()
-        vl_loss = 0.0
-        preds_v, trues_v = [], []
+        val_loss = 0.0
+        all_targets, all_outputs = [], []
         with torch.no_grad():
-            for xb, yb in va_loader:
-                xb, yb = xb.to(device), yb.to(device)
-                out     = model(xb)
-                vl_loss += _loss(out, yb, epoch).item()
-                preds_v.append(out.cpu().numpy())
-                trues_v.append(yb.cpu().numpy())
-        avg_va = vl_loss / len(va_loader)
-        val_losses.append(avg_va)
+            for inputs, targets in val_loader:
+                inputs, targets = inputs.to(device), targets.to(device)
+                outputs = model(inputs)
+                val_loss += criterion(outputs, targets).item()
+                all_targets.append(targets.cpu().numpy())
+                all_outputs.append(outputs.cpu().numpy())
 
-        if epoch >= WARMUP_EPOCHS:
-            cosine_scheduler.step()
+        avg_val_loss = val_loss / len(val_loader)
+        history['val_loss'].append(avg_val_loss)
+        scheduler.step(avg_val_loss)
 
-        raw_pred = y_scaler.inverse_transform(
-            np.concatenate(preds_v).reshape(-1, 1)).flatten()
-        raw_true = y_scaler.inverse_transform(
-            np.concatenate(trues_v).reshape(-1, 1)).flatten()
-        vm = _fast_metrics(raw_true, raw_pred, threshold=thr)
-        val_mae_h.append(vm['mae']); val_f1_h.append(vm['f1'])
-        val_p_h.append(vm['precision']); val_r_h.append(vm['recall'])
-        val_time_h.append(time.time() - vt0)
+        threshold = get_threshold_for_appliance(appliance_name)
+        raw_tgts = y_scaler.inverse_transform(
+            np.concatenate(all_targets).reshape(-1, 1)).flatten()
+        raw_outs = y_scaler.inverse_transform(
+            np.concatenate(all_outputs).reshape(-1, 1)).flatten()
+        metrics = calculate_nilm_metrics(raw_tgts, raw_outs, threshold=threshold)
+        history['val_metrics'].append(metrics)
 
-        print(f"  Epoch {epoch+1:3d}/{epochs}  "
-              f"train={avg_tr:.5f}  val={avg_va:.5f}  "
-              f"F1={vm['f1']:.4f}  P={vm['precision']:.4f}  R={vm['recall']:.4f}  "
-              f"MAE={vm['mae']:.1f}  lr={optimizer.param_groups[0]['lr']:.2e}")
+        print(f"Epoch {epoch+1}/{epochs}, Train Loss: {avg_train_loss:.6f}, "
+              f"Val Loss: {avg_val_loss:.6f}, Val MAE: {metrics['mae']:.2f}, "
+              f"Val SAE: {metrics['sae']:.2f}, Val F1: {metrics['f1']:.4f}, "
+              f"Val Precision: {metrics['precision']:.4f}, Val Recall: {metrics['recall']:.4f}")
 
-        if epoch == WARMUP_EPOCHS:
-            best_val = float('inf'); best_val_f1 = -1.0; no_improve = 0
-
-        improved = (avg_va < best_val) if epoch < WARMUP_EPOCHS \
-                   else (vm['f1'] > best_val_f1)
-        if improved:
-            best_val = avg_va; best_val_f1 = vm['f1']
-            best_state = {k: v.clone() for k, v in model.state_dict().items()}
-            no_improve = 0
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            best_state    = {k: v.clone() for k, v in model.state_dict().items()}
+            counter = 0
+            best_model_path = os.path.join(
+                save_dir, f"conductance_lnn_redd_{appliance_name.replace(' ', '_')}_best.pth")
+            save_model(model,
+                       {'input_size': 1, 'output_size': 1,
+                        'hidden_size': hidden_size, 'dt': dt},
+                       {'lr': lr, 'epochs': epochs, 'patience': patience,
+                        'window_size': window_size, 'appliance': appliance_name},
+                       metrics, best_model_path)
+            print(f"Model saved to {best_model_path}")
         else:
-            no_improve += 1
-            if no_improve >= PATIENCE:
-                print(f"  Early stopping at epoch {epoch+1}")
+            counter += 1
+            print(f"EarlyStopping counter: {counter} out of {patience}")
+            if counter >= patience:
+                print("Early stopping triggered")
                 break
+
+    print("Training completed!")
 
     if best_state is not None:
         model.load_state_dict(best_state)
+
+    print("Evaluating on test set...")
     model.eval()
-
-    infer_t0 = time.time()
-    preds_t, trues_t = [], []
+    all_test_targets, all_test_outputs = [], []
+    test_loss = 0.0
     with torch.no_grad():
-        for xb, yb in te_loader:
-            preds_t.append(model(xb.to(device)).cpu().numpy())
-            trues_t.append(yb.numpy())
-    infer_s = time.time() - infer_t0
+        for inputs, targets in test_loader:
+            inputs, targets = inputs.to(device), targets.to(device)
+            outputs = model(inputs)
+            test_loss += criterion(outputs, targets).item()
+            all_test_targets.append(targets.cpu().numpy())
+            all_test_outputs.append(outputs.cpu().numpy())
 
-    raw_pred_te = y_scaler.inverse_transform(
-        np.concatenate(preds_t).reshape(-1, 1)).flatten()
-    raw_true_te = y_scaler.inverse_transform(
-        np.concatenate(trues_t).reshape(-1, 1)).flatten()
-    test_metrics = calculate_nilm_metrics(raw_true_te, raw_pred_te, threshold=thr)
+    avg_test_loss = test_loss / len(test_loader)
+    threshold = get_threshold_for_appliance(appliance_name)
+    all_test_targets = y_scaler.inverse_transform(
+        np.concatenate(all_test_targets).reshape(-1, 1)).flatten()
+    all_test_outputs = y_scaler.inverse_transform(
+        np.concatenate(all_test_outputs).reshape(-1, 1)).flatten()
+    test_metrics = calculate_nilm_metrics(all_test_targets, all_test_outputs, threshold=threshold)
 
-    print(f"\n  Test  F1={test_metrics['f1']:.4f}  P={test_metrics['precision']:.4f}  "
-          f"R={test_metrics['recall']:.4f}  MAE={test_metrics['mae']:.2f}  "
-          f"SAE={test_metrics['sae']:.4f}")
+    val_mae_series       = [m['mae']       for m in history['val_metrics']]
+    val_sae_series       = [m['sae']       for m in history['val_metrics']]
+    val_f1_series        = [m['f1']        for m in history['val_metrics']]
+    val_precision_series = [m['precision'] for m in history['val_metrics']]
+    val_recall_series    = [m['recall']    for m in history['val_metrics']]
 
-    return {
-        'metrics':      test_metrics,
-        'train_losses': train_losses,
-        'val_losses':   val_losses,
-        'val_mae_h':    val_mae_h,
-        'val_f1_h':     val_f1_h,
-        'val_p_h':      val_p_h,
-        'val_r_h':      val_r_h,
-        'val_time_h':   val_time_h,
-        'infer_s':      infer_s,
-        'epochs_run':   len(train_losses),
-        'num_params':   n_params,
+    aggregates = {
+        'train_loss_mean':      float(np.mean(history['train_loss'])),
+        'train_loss_var':       float(np.var(history['train_loss'])),
+        'val_loss_mean':        float(np.mean(history['val_loss'])),
+        'val_loss_var':         float(np.var(history['val_loss'])),
+        'val_mae_mean':         float(np.mean(val_mae_series)),
+        'val_mae_var':          float(np.var(val_mae_series)),
+        'val_sae_mean':         float(np.mean(val_sae_series)),
+        'val_sae_var':          float(np.var(val_sae_series)),
+        'val_f1_mean':          float(np.mean(val_f1_series)),
+        'val_f1_var':           float(np.var(val_f1_series)),
+        'val_precision_mean':   float(np.mean(val_precision_series)),
+        'val_precision_var':    float(np.var(val_precision_series)),
+        'val_recall_mean':      float(np.mean(val_recall_series)),
+        'val_recall_var':       float(np.var(val_recall_series)),
+        'test_mae':             float(test_metrics['mae']),
+        'test_sae':             float(test_metrics['sae']),
+        'test_f1':              float(test_metrics['f1']),
+        'test_precision':       float(test_metrics['precision']),
+        'test_recall':          float(test_metrics['recall']),
+        'test_loss':            float(avg_test_loss)
     }
 
+    print(f"Test Loss: {avg_test_loss:.6f}")
+    print(f"Test Metrics: {test_metrics}")
 
-# ── Plotting ───────────────────────────────────────────────────────────────────
+    plt.figure(figsize=(15, 10))
 
-def plot_training_curves(results, save_dir):
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
-    for ax, app in zip(axes.flatten(), APPLIANCES):
-        if app not in results:
-            continue
-        r  = results[app]; ep = range(1, r['epochs_run'] + 1)
-        ax.plot(ep, r['train_losses'], label='Train', color='steelblue', lw=1.5)
-        ax.plot(ep, r['val_losses'],   label='Val',   color='tomato',    lw=1.5, ls='--')
-        ax.axvline(WARMUP_EPOCHS, color='grey', ls=':', lw=1, label='BCE start')
-        ax.set_title(app.title()); ax.set_xlabel('Epoch'); ax.set_ylabel('Loss')
-        ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
-    fig.suptitle('Training Curves — Conductance LTC (REDD)', fontsize=12)
+    plt.subplot(2, 2, 1)
+    plt.plot(history['train_loss'], label='Train Loss', color='blue')
+    plt.plot(history['val_loss'],   label='Val Loss',   color='red')
+    plt.title(f'Loss - {appliance_name}')
+    plt.xlabel('Epoch'); plt.ylabel('MSE Loss')
+    plt.legend(); plt.grid(True, alpha=0.3)
+
+    plt.subplot(2, 2, 2)
+    plt.plot(val_mae_series, label='Val MAE', color='red')
+    plt.axhline(test_metrics['mae'], label='Test MAE', color='green', linestyle='--')
+    plt.title(f'MAE - {appliance_name}')
+    plt.xlabel('Epoch'); plt.ylabel('MAE (W)')
+    plt.legend(); plt.grid(True, alpha=0.3)
+
+    plt.subplot(2, 2, 3)
+    plt.plot(val_sae_series, label='Val SAE', color='red')
+    plt.axhline(test_metrics['sae'], label='Test SAE', color='green', linestyle='--')
+    plt.title(f'SAE - {appliance_name}')
+    plt.xlabel('Epoch'); plt.ylabel('SAE')
+    plt.legend(); plt.grid(True, alpha=0.3)
+
+    plt.subplot(2, 2, 4)
+    plt.plot(val_f1_series,        label='Val F1',        color='red')
+    plt.plot(val_precision_series, label='Val Precision', color='blue')
+    plt.plot(val_recall_series,    label='Val Recall',    color='orange')
+    plt.axhline(test_metrics['f1'],        color='red',    linestyle='--', alpha=0.5)
+    plt.axhline(test_metrics['precision'], color='blue',   linestyle='--', alpha=0.5)
+    plt.axhline(test_metrics['recall'],    color='orange', linestyle='--', alpha=0.5)
+    plt.title(f'F1 / Precision / Recall - {appliance_name}')
+    plt.xlabel('Epoch'); plt.ylabel('Score')
+    plt.legend(); plt.grid(True, alpha=0.3)
+
     plt.tight_layout()
-    path = os.path.join(save_dir, 'training_curves.png')
-    plt.savefig(path, dpi=150, bbox_inches='tight'); plt.close()
-    print(f"  Saved: {path}")
+    plt.savefig(os.path.join(save_dir,
+        f"conductance_lnn_redd_{appliance_name.replace(' ', '_')}_metrics.png"),
+        dpi=150, bbox_inches='tight')
+    plt.close()
+
+    config = {
+        'appliance': appliance_name,
+        'dataset': 'REDD',
+        'model': 'ConductanceLTCModel',
+        'ode': 'tau(x)*dh/dt = -h + sigma(W_A*x + U_A*h)*(E_rev - h)',
+        'norm': 'none',
+        'loss': 'MSE',
+        'window_size': window_size,
+        'model_params': {
+            'input_size': 1, 'output_size': 1,
+            'hidden_size': hidden_size, 'dt': dt
+        },
+        'train_params': {'lr': lr, 'epochs': epochs, 'patience': patience},
+        'final_metrics': {
+            'test_metrics': {k: float(v) for k, v in test_metrics.items()},
+            'aggregates': aggregates
+        }
+    }
+    with open(os.path.join(save_dir,
+            f'conductance_lnn_redd_{appliance_name.replace(" ", "_")}_history.json'),
+            'w', encoding='utf-8') as f:
+        json.dump(config, f, indent=4)
+
+    return model, history, test_metrics
 
 
-def plot_epoch_metrics(results, save_dir):
-    fig, axes = plt.subplots(len(APPLIANCES), 3, figsize=(15, 4 * len(APPLIANCES)))
-    for row, app in enumerate(APPLIANCES):
-        if app not in results:
-            continue
-        r  = results[app]; ep = range(1, r['epochs_run'] + 1)
-        for col, (key, label) in enumerate(
-                [('val_mae_h', 'MAE (W)'), ('val_f1_h', 'F1'),
-                 ('val_p_h', 'Precision / Recall')]):
-            ax = axes[row, col]
-            ax.plot(ep, r[key], color=COLOR, lw=1.5, label=label)
-            if label == 'Precision / Recall':
-                ax.plot(ep, r['val_r_h'], color='orange', lw=1.5, ls='--', label='Recall')
-                ax.legend(fontsize=7)
-            ax.axvline(WARMUP_EPOCHS, color='grey', ls=':', lw=1)
-            ax.set_title(f'{app.title()} — {label}')
-            ax.set_xlabel('Epoch'); ax.set_ylabel(label); ax.grid(True, alpha=0.3)
-    fig.suptitle('Val Metrics per Epoch — Conductance LTC (REDD)', fontsize=12)
-    plt.tight_layout()
-    path = os.path.join(save_dir, 'epoch_metrics.png')
-    plt.savefig(path, dpi=150, bbox_inches='tight'); plt.close()
-    print(f"  Saved: {path}")
+def test_on_all_appliances(window_size=100, hidden_size=64, dt=0.1,
+                           epochs=80, lr=0.001, patience=20):
+    data_dict = load_redd_specific_splits()
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_save_dir = f"models/conductance_lnn_redd_specific_test_{timestamp}"
+
+    all_results = {}
+    appliances = ['dish washer', 'fridge', 'microwave', 'washer dryer']
+
+    for appliance_name in appliances:
+        print(f"\n{'='*60}")
+        print(f"Testing ConductanceLTCModel on {appliance_name}")
+        print(f"{'='*60}\n")
+
+        appliance_dir = os.path.join(base_save_dir, appliance_name.replace(' ', '_'))
+        os.makedirs(appliance_dir, exist_ok=True)
+
+        try:
+            model, history, test_metrics = train_on_appliance(
+                data_dict,
+                appliance_name=appliance_name,
+                window_size=window_size,
+                hidden_size=hidden_size,
+                dt=dt,
+                epochs=epochs,
+                lr=lr,
+                patience=patience,
+                save_dir=appliance_dir
+            )
+            if model is not None:
+                all_results[appliance_name] = {
+                    'model_path': os.path.join(
+                        appliance_dir,
+                        f"conductance_lnn_redd_{appliance_name.replace(' ', '_')}_best.pth"),
+                    'final_metrics': {k: float(v) for k, v in test_metrics.items()}
+                }
+        except Exception as e:
+            print(f"Error on {appliance_name}: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    summary = {
+        'timestamp': timestamp,
+        'dataset': 'REDD',
+        'model': 'ConductanceLTCModel',
+        'ode': 'tau(x)*dh/dt = -h + sigma(W_A*x + U_A*h)*(E_rev - h)',
+        'window_size': window_size,
+        'model_params': {'hidden_size': hidden_size, 'dt': dt},
+        'train_params': {'epochs': epochs, 'lr': lr, 'patience': patience},
+        'results': all_results
+    }
+
+    os.makedirs(base_save_dir, exist_ok=True)
+    with open(os.path.join(base_save_dir, 'summary.json'), 'w', encoding='utf-8') as f:
+        json.dump(summary, f, indent=4)
+
+    print(f"\nConductanceLTCModel REDD testing completed. Results saved to {base_save_dir}\n")
+    print(f"{'Appliance':<15} {'F1':>8} {'Precision':>10} {'Recall':>8} {'MAE':>8} {'SAE':>8}")
+    print("-" * 65)
+    for app in appliances:
+        if app in all_results:
+            m = all_results[app]['final_metrics']
+            print(f"{app:<15} {m['f1']:>8.4f} {m['precision']:>10.4f} "
+                  f"{m['recall']:>8.4f} {m['mae']:>8.2f} {m['sae']:>8.4f}")
+
+    return all_results
 
 
-def plot_bar_chart(results, save_dir):
-    metrics_cfg = [('mae', 'MAE (W)'), ('sae', 'SAE'), ('f1', 'F1'),
-                   ('precision', 'Precision'), ('recall', 'Recall')]
-    x = np.arange(len(APPLIANCES))
-    fig, axes = plt.subplots(1, len(metrics_cfg), figsize=(18, 5))
-    for ax, (mk, ml) in zip(axes, metrics_cfg):
-        vals = [results[app]['metrics'].get(mk, np.nan)
-                if app in results else np.nan for app in APPLIANCES]
-        bars = ax.bar(x, vals, color=COLOR, alpha=0.85, edgecolor='white')
-        for bar, v in zip(bars, vals):
-            if not np.isnan(v):
-                ax.text(bar.get_x() + bar.get_width() / 2,
-                        bar.get_height() * 1.01,
-                        f'{v:.3f}', ha='center', va='bottom', fontsize=8)
-        ax.set_xticks(x); ax.set_xticklabels(APP_LABELS, rotation=12, ha='right')
-        ax.set_ylabel(ml); ax.set_title(ml)
-        ax.grid(axis='y', alpha=0.3); ax.set_axisbelow(True)
-    fig.suptitle('Final Test Metrics — Conductance LTC (REDD)', fontsize=12)
-    plt.tight_layout()
-    path = os.path.join(save_dir, 'bar_chart.png')
-    plt.savefig(path, dpi=150, bbox_inches='tight'); plt.close()
-    print(f"  Saved: {path}")
+if __name__ == "__main__":
+    print("Testing ConductanceLTCModel on REDD dataset with specific splits...")
 
-
-def print_table(results):
-    divider = '─' * 70
-    for metric, label in [('f1', 'F1'), ('precision', 'Precision'),
-                           ('recall', 'Recall'), ('mae', 'MAE'), ('sae', 'SAE')]:
-        print(f"\n{'='*70}")
-        print(f"  {label} — Conductance LTC (REDD)")
-        print(f"{'='*70}")
-        print(f"  {'Appliance':<20}{'Value':>12}  (epochs)")
-        print(divider)
-        vals = []
-        for app in APPLIANCES:
-            if app in results:
-                v  = results[app]['metrics'].get(metric, float('nan'))
-                ep = results[app]['epochs_run']
-                print(f"  {app.title():<20}{v:>12.4f}  ({ep})")
-                vals.append(v)
-        print(divider)
-        if vals:
-            print(f"  {'Average':<20}{np.nanmean(vals):>12.4f}")
-
-
-# ── JSON helpers ───────────────────────────────────────────────────────────────
-
-def _save_json(app, r, hidden, epochs, save_dir):
-    os.makedirs(save_dir, exist_ok=True)
-    path = os.path.join(save_dir, f'{app.replace(" ", "_")}.json')
-    with open(path, 'w') as f:
-        json.dump({
-            'appliance':     app,
-            'dataset':       'REDD',
-            'architecture':  'ConductanceLTCModel',
-            'ode':           'tau(x)*dh/dt = -h + sigma(W_A*x + U_A*h)*(E_rev - h)',
-            'hidden_size':   hidden,
-            'epochs':        epochs,
-            'epochs_run':    r['epochs_run'],
-            'num_params':    r['num_params'],
-            'bce_lambda':    BCE_LAMBDA[app],
-            'bce_alpha':     BCE_ALPHA[app],
-            'warmup_epochs': WARMUP_EPOCHS,
-            'metrics':       {k: float(v) for k, v in r['metrics'].items()},
-            'train_losses':  r['train_losses'],
-            'val_losses':    r['val_losses'],
-            'val_mae_h':     r['val_mae_h'],
-            'val_f1_h':      r['val_f1_h'],
-            'val_p_h':       r['val_p_h'],
-            'val_r_h':       r['val_r_h'],
-            'val_time_h':    r['val_time_h'],
-            'infer_s':       r['infer_s'],
-        }, f, indent=2)
-    print(f'  JSON saved → {path}')
-
-
-def _load_all_jsons(save_dir):
-    results = {}
-    for app in APPLIANCES:
-        path = os.path.join(save_dir, f'{app.replace(" ", "_")}.json')
-        if os.path.exists(path):
-            with open(path) as f:
-                results[app] = json.load(f)
-            print(f'  Loaded {app} ← {path}')
-        else:
-            print(f'  Missing: {path}  (run --appliance "{app}" first)')
-    return results
-
-
-# ── Main ───────────────────────────────────────────────────────────────────────
-
-def main():
-    parser = argparse.ArgumentParser(description='Conductance LTC — REDD')
-    parser.add_argument('--epochs',    type=int, default=EPOCHS)
-    parser.add_argument('--hidden',    type=int, default=256)
-    parser.add_argument('--appliance', type=str, default=None, choices=APPLIANCES)
-    parser.add_argument('--plot',      action='store_true')
-    parser.add_argument('--save_dir',  type=str, default=SAVE_DIR)
-    args = parser.parse_args()
-
-    save_dir = args.save_dir
-    os.makedirs(save_dir, exist_ok=True)
-
-    if args.plot:
-        print('Plot mode — loading saved results...')
-        results = _load_all_jsons(save_dir)
-        if not results:
-            print('No results found. Run at least one appliance first.')
+    for f in ['data/redd/train_small.pkl', 'data/redd/val_small.pkl',
+              'data/redd/test_small.pkl']:
+        if not os.path.exists(f):
+            print(f"Error: {f} not found!")
             sys.exit(1)
-        plot_training_curves(results, save_dir)
-        plot_epoch_metrics(results, save_dir)
-        plot_bar_chart(results, save_dir)
-        print_table(results)
-        return
 
-    for fp in ['data/redd/train_small.pkl',
-               'data/redd/val_small.pkl',
-               'data/redd/test_small.pkl']:
-        if not os.path.exists(fp):
-            print(f'ERROR: {fp} not found'); sys.exit(1)
+    results = test_on_all_appliances(
+        window_size=100,
+        hidden_size=64,
+        dt=0.1,
+        epochs=80,
+        lr=0.001,
+        patience=20
+    )
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f'Device: {device}  |  Hidden: {args.hidden}  |  Epochs: {args.epochs}')
-    print('ODE: τ(x)·dh/dt = –h + σ(W_A·x + U_A·h)·(E_rev – h)')
-
-    splits      = load_data()
-    apps_to_run = [args.appliance] if args.appliance else APPLIANCES
-
-    total_t0 = time.time()
-    all_results: dict = {}
-
-    for app in apps_to_run:
-        t0 = time.time()
-        r  = train_appliance(app, splits, device, args.epochs, args.hidden)
-        r['time_s'] = time.time() - t0
-        m = r['metrics']
-        print(f"\n  DONE {app:<15} | F1={m['f1']:.4f}  P={m['precision']:.4f}  "
-              f"R={m['recall']:.4f}  MAE={m['mae']:.2f}  SAE={m['sae']:.4f}  "
-              f"({r['num_params']:,} params  {r['time_s']:.0f}s)")
-        _save_json(app, r, args.hidden, args.epochs, save_dir)
-        all_results[app] = r
-
-    total_s = time.time() - total_t0
-    print(f'\nTotal time: {total_s:.0f}s ({total_s/60:.1f} min)')
-
-    all_done = all(
-        os.path.exists(os.path.join(save_dir, f'{a.replace(" ", "_")}.json'))
-        for a in APPLIANCES)
-    if all_done:
-        full = _load_all_jsons(save_dir)
-        print('\nAll appliances complete — generating plots...')
-        plot_training_curves(full, save_dir)
-        plot_epoch_metrics(full, save_dir)
-        plot_bar_chart(full, save_dir)
-        print_table(full)
-    else:
-        missing = [a for a in APPLIANCES
-                   if not os.path.exists(
-                       os.path.join(save_dir, f'{a.replace(" ", "_")}.json'))]
-        print(f'\nStill missing: {missing}')
-        print('Run those, then: python test_lnn_conductance_redd_specific_splits.py --plot')
-
-    print(f'\nAll outputs → {save_dir}/')
-
-
-if __name__ == '__main__':
-    main()
+    print(f"\nSummary of ConductanceLTCModel testing on REDD dataset:")
+    print(f"Total appliances tested: {len(results)}")
+    for appliance, result in results.items():
+        print(f"  {appliance}:")
+        print(f"    Test MAE:       {result['final_metrics']['mae']:.4f}")
+        print(f"    Test SAE:       {result['final_metrics']['sae']:.4f}")
+        print(f"    Test F1:        {result['final_metrics']['f1']:.4f}")
+        print(f"    Test Precision: {result['final_metrics']['precision']:.4f}")
+        print(f"    Test Recall:    {result['final_metrics']['recall']:.4f}")
