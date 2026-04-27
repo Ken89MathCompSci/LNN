@@ -28,7 +28,10 @@
       "Bash(echo \"data/AMPds2.h5\")",
       "Bash(git add *)",
       "Bash(git commit -m ' *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(where py *)",
+      "Bash(py --version)",
+      "Bash(py -c ' *)"
     ]
   }
 }
