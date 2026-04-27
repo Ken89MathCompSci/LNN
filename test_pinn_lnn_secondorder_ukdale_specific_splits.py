@@ -1,31 +1,38 @@
 """
-Physics-Informed LNN with Learnable Resting State — UKDALE specific splits.
+Physics-Informed LNN with Second-Order ODE — UKDALE specific splits.
 
 Identical to test_pinn_lnn_ukdale_specific_splits.py in every way except the
-decay term in the ODE.
+ODE integrator, which is promoted from first-order to second-order by
+introducing a velocity state v ∈ ℝ^H alongside the position state h ∈ ℝ^H.
 
-Original:   dh/dt = −h/τ  + g⊙f_t
-            Hidden state always decays toward zero between inputs.
+First-order (original):
+    dh/dt = −h/τ  + g ⊙ f_t
+    h is driven directly by the input gate and decays toward zero.
 
-This file:  dh/dt = −(h − h_rest)/τ  + g⊙f_t
-            Hidden state decays toward a learnable per-unit resting value h_rest
-            instead of zero.
+Second-order (this file):
+    dv/dt = −v/τ_v + g ⊙ f_t      velocity — driven by input, damped by τ_v
+    dh/dt = v                       position — integrates velocity
+
+    Euler steps:
+        dv = (−v / τ_v + g ⊙ f_t) · dt
+        v  ← v + dv
+        dh = v · dt
+        h  ← h + dh
 
 Why this matters for NILM:
-    Appliances like the fridge are never truly "off" — they draw a baseline
-    current continuously (standby / cycling compressor).  With zero-decay the
-    hidden units must fight the decay term to maintain any non-zero resting
-    representation.  With h_rest ≠ 0 the network can learn the natural idle
-    state of each hidden unit, and the gate g only needs to encode deviations
-    from that baseline.
+    The first-order ODE lets h jump as fast as the gate allows.
+    The second-order system forces h to accelerate through v first —
+    so it cannot respond instantaneously.  This better models loads with
+    slow ramp-up: washing machine drum reaching speed, fridge compressor
+    starting, dishwasher filling cycle.  h now has inertia.
 
-Implementation change (single line + one parameter):
-    self.h_rest = nn.Parameter(torch.zeros(hidden_size))   # initialised at 0
-    ...
-    dh = (-(h - self.h_rest) / tau + gate * f_t) * self.dt
+    τ_v controls how quickly the velocity damps out.  Small τ_v → fast
+    damping, near-first-order behaviour.  Large τ_v → slow damping,
+    oscillatory transients (physically: slow ramp appliances).
 
-Everything else — loss, warmup, BCE, physics constraint, scalers, plots — is
-unchanged from the original PINN-LNN script.
+State size doubles: total hidden state is (h, v) ∈ ℝ^{2H}, but parameter
+count only increases by H extra τ_v values — all existing weight matrices
+remain the same size because v does not feed back into f_t or the gate.
 """
 
 import sys
@@ -102,24 +109,25 @@ class PhysicsConsistencyLoss(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Physics-Informed LNN with Learnable Resting State
+# Physics-Informed LNN with Second-Order ODE
 # ---------------------------------------------------------------------------
 
-class RestingStatePINNLiquidNetworkModel(nn.Module):
+class SecondOrderPINNLiquidNetworkModel(nn.Module):
     """
-    Shared encoder with resting-state decay:
+    Shared encoder with coupled (v, h) second-order dynamics:
 
-        τ   = softplus(τ_base) ⊙ sigmoid(W_τ · x_t)   — adaptive time constant
+        τ   = softplus(τ_base) ⊙ sigmoid(W_τ · x_t)   — adaptive position τ
+        τ_v = softplus(τ_v_base)                        — velocity damping τ
         g   = sigmoid(W_gate · [x_t ; h])              — input-dependent gate
-        f_t = tanh(W_in · x_t + W_rec · h)             — candidate update
+        f_t = tanh(W_in · x_t + W_rec · h)             — candidate drive
 
-        dh/dt = −(h − h_rest) / τ  +  g ⊙ f_t
+        dv  = (−v / τ_v + g ⊙ f_t) · dt
+        v   ← v + dv
+        dh  = v · dt
+        h   ← h + dh
 
-        h ← h + dh · dt
-
-    h_rest ∈ ℝ^H is a learnable parameter initialised at zero.
-    The hidden state now decays toward h_rest rather than zero, allowing the
-    network to represent non-zero idle states (e.g. fridge standby power).
+    Only h is read by the output heads.  v is purely internal.
+    The recurrent connection W_rec still reads from h (position), not v.
     """
 
     def __init__(self, input_size, hidden_size, n_appliances, dt=0.1):
@@ -128,7 +136,7 @@ class RestingStatePINNLiquidNetworkModel(nn.Module):
         self.n_appliances = n_appliances
         self.dt           = dt
 
-        # Shared encoder weights
+        # Shared encoder weights (identical to original)
         self.input_proj  = nn.Linear(input_size, hidden_size)
         self.tau_base    = nn.Parameter(torch.ones(hidden_size))
         self.tau_mod     = nn.Linear(input_size, hidden_size)
@@ -136,10 +144,10 @@ class RestingStatePINNLiquidNetworkModel(nn.Module):
         nn.init.xavier_uniform_(self.rec_weights)
         self.gate        = nn.Linear(input_size + hidden_size, hidden_size)
 
-        # Learnable resting state — initialised at zero (same as original at t=0)
-        self.h_rest = nn.Parameter(torch.zeros(hidden_size))
+        # Velocity damping time constant — one learnable scalar per hidden unit
+        self.tau_v_base  = nn.Parameter(torch.ones(hidden_size))
 
-        self.norm = nn.LayerNorm(hidden_size)
+        self.norm  = nn.LayerNorm(hidden_size)
 
         self.heads = nn.ModuleList([
             nn.Linear(hidden_size, 1) for _ in range(n_appliances)
@@ -154,6 +162,7 @@ class RestingStatePINNLiquidNetworkModel(nn.Module):
         """
         batch_size, seq_len, _ = x.size()
         h = torch.zeros(batch_size, self.hidden_size, device=x.device)
+        v = torch.zeros(batch_size, self.hidden_size, device=x.device)
 
         for t in range(seq_len):
             x_t = x[:, t, :]
@@ -161,16 +170,22 @@ class RestingStatePINNLiquidNetworkModel(nn.Module):
             input_proj = self.input_proj(x_t)
             rec_proj   = torch.matmul(h, self.rec_weights)
 
+            # Adaptive position time constant (input-modulated)
             tau_base = F.softplus(self.tau_base).unsqueeze(0)
             tau_mod  = torch.sigmoid(self.tau_mod(x_t))
             tau      = (tau_base * tau_mod).clamp(min=self.dt)
 
+            # Velocity damping time constant (not input-modulated — global per unit)
+            tau_v = F.softplus(self.tau_v_base).unsqueeze(0).clamp(min=self.dt)
+
             gate = torch.sigmoid(self.gate(torch.cat([x_t, h], dim=1)))
+            f_t  = torch.tanh(input_proj + rec_proj)
 
-            f_t = torch.tanh(input_proj + rec_proj)
+            # Second-order update
+            dv = (-v / tau_v + gate * f_t) * self.dt
+            v  = (v + dv).clamp(-10.0, 10.0)
 
-            # Resting-state decay: pull toward h_rest instead of zero
-            dh = (-(h - self.h_rest) / tau + gate * f_t) * self.dt
+            dh = v * self.dt
             h  = (h + dh).clamp(-10.0, 10.0)
 
         h = self.norm(h)
@@ -252,7 +267,7 @@ def train_pinn_model(data_dict, save_dir,
     os.makedirs(save_dir, exist_ok=True)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
-    print(f"ODE: resting-state decay  dt={dt}  λ_phys={lambda_phys}  ε={epsilon_w}W  hidden={hidden_size}")
+    print(f"ODE: second-order (v,h)  dt={dt}  λ_phys={lambda_phys}  ε={epsilon_w}W  hidden={hidden_size}")
 
     X_tr, Y_tr = create_sequences(data_dict['train'], WIN)
     X_va, Y_va = create_sequences(data_dict['val'],   WIN)
@@ -288,7 +303,7 @@ def train_pinn_model(data_dict, save_dir,
     te_loader = torch.utils.data.DataLoader(
         MultiApplianceDataset(X_te, Y_te), batch_size=BATCH, shuffle=False, drop_last=False)
 
-    model = RestingStatePINNLiquidNetworkModel(
+    model = SecondOrderPINNLiquidNetworkModel(
         input_size=1, hidden_size=hidden_size,
         n_appliances=len(APPLIANCES), dt=dt,
     ).to(device)
@@ -313,7 +328,7 @@ def train_pinn_model(data_dict, save_dir,
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model parameters: {n_params:,}")
-    print("Starting PINN-LNN (resting-state decay) training...")
+    print("Starting PINN-LNN (second-order) training...")
 
     for epoch in range(EPOCHS):
         model.train()
@@ -453,9 +468,9 @@ def train_pinn_model(data_dict, save_dir,
 
     config = {
         'dataset': 'UKDALE',
-        'model': 'RestingStatePINNLiquidNetworkModel',
-        'description': 'resting-state decay LTC encoder + per-appliance heads + L_phys',
-        'ode': 'dh/dt = -(h - h_rest)/tau + g*f_t  [h_rest learnable, init=0]',
+        'model': 'SecondOrderPINNLiquidNetworkModel',
+        'description': 'second-order (v,h) LTC encoder + per-appliance heads + L_phys',
+        'ode': 'dv = (-v/tau_v + g*f_t)*dt;  dh = v*dt',
         'loss': f'MSE + {lambda_phys} * PhysicsConsistency(ε={epsilon_w}W)',
         'window_size': WIN,
         'model_params': {
@@ -471,7 +486,7 @@ def train_pinn_model(data_dict, save_dir,
             for app, m in test_metrics.items()
         },
     }
-    with open(os.path.join(save_dir, 'pinn_lnn_reststate_ukdale_results.json'),
+    with open(os.path.join(save_dir, 'pinn_lnn_secondorder_ukdale_results.json'),
               'w', encoding='utf-8') as f:
         json.dump(config, f, indent=4)
 
@@ -509,13 +524,13 @@ def _plot_training(history, test_metrics, save_dir):
     plt.legend(); plt.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, 'pinn_lnn_reststate_ukdale_loss.png'),
+    plt.savefig(os.path.join(save_dir, 'pinn_lnn_secondorder_ukdale_loss.png'),
                 dpi=150, bbox_inches='tight')
     plt.close()
 
     fig, axes = plt.subplots(len(APPLIANCES), 2,
                              figsize=(12, 4 * len(APPLIANCES)))
-    fig.suptitle('PINN-LNN Resting State UKDALE — Per-Appliance Val Metrics', fontsize=13)
+    fig.suptitle('PINN-LNN Second-Order UKDALE — Per-Appliance Val Metrics', fontsize=13)
 
     for row, app in enumerate(APPLIANCES):
         f1_series  = [m[app]['f1']  for m in history['val_metrics']]
@@ -539,7 +554,7 @@ def _plot_training(history, test_metrics, save_dir):
         ax_mae.legend(); ax_mae.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, 'pinn_lnn_reststate_ukdale_per_appliance.png'),
+    plt.savefig(os.path.join(save_dir, 'pinn_lnn_secondorder_ukdale_per_appliance.png'),
                 dpi=150, bbox_inches='tight')
     plt.close()
 
@@ -556,7 +571,7 @@ if __name__ == "__main__":
             sys.exit(1)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_dir  = f"models/pinn_lnn_reststate_ukdale_{timestamp}"
+    save_dir  = f"models/pinn_lnn_secondorder_ukdale_{timestamp}"
 
     data_dict = load_data()
 
