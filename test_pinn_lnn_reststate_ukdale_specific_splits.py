@@ -1,39 +1,31 @@
 """
-Physics-Informed LNN with Implicit Euler ODE — UKDALE specific splits.
+Physics-Informed LNN with Learnable Resting State — UKDALE specific splits.
 
 Identical to test_pinn_lnn_ukdale_specific_splits.py in every way except the
-ODE integrator.  The original script uses explicit Euler:
+decay term in the ODE.
 
-    h ← h + (−h/τ + g⊙f_t) · dt          [explicit, conditionally stable]
+Original:   dh/dt = −h/τ  + g⊙f_t
+            Hidden state always decays toward zero between inputs.
 
-This script replaces it with implicit Euler, solved analytically:
+This file:  dh/dt = −(h − h_rest)/τ  + g⊙f_t
+            Hidden state decays toward a learnable per-unit resting value h_rest
+            instead of zero.
 
-    h_new = h + (−h_new/τ + g⊙f_t) · dt
-    h_new (1 + dt/τ) = h + g⊙f_t · dt
-    h_new = (h + g⊙f_t · dt) / (1 + dt/τ)  [implicit, unconditionally stable]
+Why this matters for NILM:
+    Appliances like the fridge are never truly "off" — they draw a baseline
+    current continuously (standby / cycling compressor).  With zero-decay the
+    hidden units must fight the decay term to maintain any non-zero resting
+    representation.  With h_rest ≠ 0 the network can learn the natural idle
+    state of each hidden unit, and the gate g only needs to encode deviations
+    from that baseline.
 
-Consequences:
-  • No clamp(h, ±10) needed — the denominator (1 + dt/τ) ≥ 1 keeps h bounded.
-  • Large dt values are now safe; the hidden state cannot explode regardless of
-    step size or τ magnitude.
-  • Gradient flow through the division is clean — no discontinuous clamp in the
-    backward pass.
+Implementation change (single line + one parameter):
+    self.h_rest = nn.Parameter(torch.zeros(hidden_size))   # initialised at 0
+    ...
+    dh = (-(h - self.h_rest) / tau + gate * f_t) * self.dt
 
-Architecture and loss are unchanged:
-    Input (batch, WIN, 1)
-         ↓
-    Shared ImplicitLiquidTimeLayer encoder (adaptive tau, input-dependent gate)
-         ↓
-    LayerNorm(hidden)
-         ↓
-    ┌────┬────┬────┬────┐
-    │ DW │ FR │ MW │ WD │  — one Linear head per appliance
-    └────┴────┴────┴────┘
-    output: (batch, 4)
-
-Loss (two-stage):
-    Stage 1 (epochs 0–19):  L = L_MSE
-    Stage 2 (epochs 20–):   L = L_MSE + λ_phys · L_phys + L_BCE
+Everything else — loss, warmup, BCE, physics constraint, scalers, plots — is
+unchanged from the original PINN-LNN script.
 """
 
 import sys
@@ -103,28 +95,31 @@ class PhysicsConsistencyLoss(nn.Module):
         self.register_buffer('y_ranges', torch.tensor(y_ranges, dtype=torch.float32))
 
     def forward(self, x_mid_scaled, pred_scaled):
-        x_raw = x_mid_scaled * self.x_range + self.x_min          # (batch,)
-        p_raw = pred_scaled  * self.y_ranges + self.y_mins         # (batch, n_apps)
+        x_raw = x_mid_scaled * self.x_range + self.x_min
+        p_raw = pred_scaled  * self.y_ranges + self.y_mins
         violation = F.relu(p_raw.sum(dim=1) - x_raw - self.epsilon)
         return violation.mean()
 
 
 # ---------------------------------------------------------------------------
-# Physics-Informed LNN with Implicit Euler ODE
+# Physics-Informed LNN with Learnable Resting State
 # ---------------------------------------------------------------------------
 
-class ImplicitPINNLiquidNetworkModel(nn.Module):
+class RestingStatePINNLiquidNetworkModel(nn.Module):
     """
-    Shared encoder using the implicit Euler LTC update:
+    Shared encoder with resting-state decay:
 
-        h_new = (h + g ⊙ f_t · dt) / (1 + dt / τ)
+        τ   = softplus(τ_base) ⊙ sigmoid(W_τ · x_t)   — adaptive time constant
+        g   = sigmoid(W_gate · [x_t ; h])              — input-dependent gate
+        f_t = tanh(W_in · x_t + W_rec · h)             — candidate update
 
-    where:
-        τ   = softplus(τ_base) ⊙ sigmoid(W_τ · x_t)   — adaptive, input-modulated
-        g   = sigmoid(W_gate · [x_t; h])               — input-dependent gate
-        f_t = tanh(W_in · x_t + W_rec · h)             — candidate state
+        dh/dt = −(h − h_rest) / τ  +  g ⊙ f_t
 
-    No clamp is applied — the denominator guarantees |h_new| ≤ max(|h|, |g⊙f_t|·dt).
+        h ← h + dh · dt
+
+    h_rest ∈ ℝ^H is a learnable parameter initialised at zero.
+    The hidden state now decays toward h_rest rather than zero, allowing the
+    network to represent non-zero idle states (e.g. fridge standby power).
     """
 
     def __init__(self, input_size, hidden_size, n_appliances, dt=0.1):
@@ -140,6 +135,9 @@ class ImplicitPINNLiquidNetworkModel(nn.Module):
         self.rec_weights = nn.Parameter(torch.empty(hidden_size, hidden_size))
         nn.init.xavier_uniform_(self.rec_weights)
         self.gate        = nn.Linear(input_size + hidden_size, hidden_size)
+
+        # Learnable resting state — initialised at zero (same as original at t=0)
+        self.h_rest = nn.Parameter(torch.zeros(hidden_size))
 
         self.norm = nn.LayerNorm(hidden_size)
 
@@ -160,18 +158,20 @@ class ImplicitPINNLiquidNetworkModel(nn.Module):
         for t in range(seq_len):
             x_t = x[:, t, :]
 
-            # Candidate state
-            f_t = torch.tanh(self.input_proj(x_t) + torch.matmul(h, self.rec_weights))
+            input_proj = self.input_proj(x_t)
+            rec_proj   = torch.matmul(h, self.rec_weights)
 
-            # Adaptive time constant: always > 0, input-modulated
-            tau = F.softplus(self.tau_base).unsqueeze(0) * torch.sigmoid(self.tau_mod(x_t))
-            tau = tau.clamp(min=1e-3)   # numerical floor only; not a stability clamp
+            tau_base = F.softplus(self.tau_base).unsqueeze(0)
+            tau_mod  = torch.sigmoid(self.tau_mod(x_t))
+            tau      = (tau_base * tau_mod).clamp(min=self.dt)
 
-            # Input-dependent gate
-            g = torch.sigmoid(self.gate(torch.cat([x_t, h], dim=1)))
+            gate = torch.sigmoid(self.gate(torch.cat([x_t, h], dim=1)))
 
-            # Implicit Euler: h_new = (h + g ⊙ f_t · dt) / (1 + dt/τ)
-            h = (h + g * f_t * self.dt) / (1.0 + self.dt / tau)
+            f_t = torch.tanh(input_proj + rec_proj)
+
+            # Resting-state decay: pull toward h_rest instead of zero
+            dh = (-(h - self.h_rest) / tau + gate * f_t) * self.dt
+            h  = (h + dh).clamp(-10.0, 10.0)
 
         h = self.norm(h)
         return torch.cat([head(h) for head in self.heads], dim=1)
@@ -252,7 +252,7 @@ def train_pinn_model(data_dict, save_dir,
     os.makedirs(save_dir, exist_ok=True)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
-    print(f"ODE: implicit Euler  dt={dt}  λ_phys={lambda_phys}  ε={epsilon_w}W  hidden={hidden_size}")
+    print(f"ODE: resting-state decay  dt={dt}  λ_phys={lambda_phys}  ε={epsilon_w}W  hidden={hidden_size}")
 
     X_tr, Y_tr = create_sequences(data_dict['train'], WIN)
     X_va, Y_va = create_sequences(data_dict['val'],   WIN)
@@ -288,7 +288,7 @@ def train_pinn_model(data_dict, save_dir,
     te_loader = torch.utils.data.DataLoader(
         MultiApplianceDataset(X_te, Y_te), batch_size=BATCH, shuffle=False, drop_last=False)
 
-    model = ImplicitPINNLiquidNetworkModel(
+    model = RestingStatePINNLiquidNetworkModel(
         input_size=1, hidden_size=hidden_size,
         n_appliances=len(APPLIANCES), dt=dt,
     ).to(device)
@@ -313,7 +313,7 @@ def train_pinn_model(data_dict, save_dir,
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model parameters: {n_params:,}")
-    print("Starting PINN-LNN (implicit Euler) training...")
+    print("Starting PINN-LNN (resting-state decay) training...")
 
     for epoch in range(EPOCHS):
         model.train()
@@ -324,7 +324,7 @@ def train_pinn_model(data_dict, save_dir,
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
 
-            pred = model(xb)                          # (batch, n_apps)
+            pred = model(xb)
             mse_loss = mse_criterion(pred, yb)
 
             x_mid     = xb[:, WIN // 2, 0]
@@ -365,7 +365,6 @@ def train_pinn_model(data_dict, save_dir,
         history['train_phys'].append(avg_tr_phys)
         history['train_loss'].append(avg_tr_total)
 
-        # ── Validation ──
         model.eval()
         vl_mse = vl_phys = vl_total = 0.0
         val_preds, val_trues = [], []
@@ -454,9 +453,9 @@ def train_pinn_model(data_dict, save_dir,
 
     config = {
         'dataset': 'UKDALE',
-        'model': 'ImplicitPINNLiquidNetworkModel',
-        'description': 'implicit Euler LTC encoder + per-appliance heads + L_phys',
-        'ode': 'h_new = (h + g*f_t*dt) / (1 + dt/tau)  [implicit Euler, unconditionally stable]',
+        'model': 'RestingStatePINNLiquidNetworkModel',
+        'description': 'resting-state decay LTC encoder + per-appliance heads + L_phys',
+        'ode': 'dh/dt = -(h - h_rest)/tau + g*f_t  [h_rest learnable, init=0]',
         'loss': f'MSE + {lambda_phys} * PhysicsConsistency(ε={epsilon_w}W)',
         'window_size': WIN,
         'model_params': {
@@ -472,7 +471,7 @@ def train_pinn_model(data_dict, save_dir,
             for app, m in test_metrics.items()
         },
     }
-    with open(os.path.join(save_dir, 'pinn_lnn_implicit_ukdale_results.json'),
+    with open(os.path.join(save_dir, 'pinn_lnn_reststate_ukdale_results.json'),
               'w', encoding='utf-8') as f:
         json.dump(config, f, indent=4)
 
@@ -510,13 +509,13 @@ def _plot_training(history, test_metrics, save_dir):
     plt.legend(); plt.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, 'pinn_lnn_implicit_ukdale_loss.png'),
+    plt.savefig(os.path.join(save_dir, 'pinn_lnn_reststate_ukdale_loss.png'),
                 dpi=150, bbox_inches='tight')
     plt.close()
 
     fig, axes = plt.subplots(len(APPLIANCES), 2,
                              figsize=(12, 4 * len(APPLIANCES)))
-    fig.suptitle('PINN-LNN Implicit Euler UKDALE — Per-Appliance Val Metrics', fontsize=13)
+    fig.suptitle('PINN-LNN Resting State UKDALE — Per-Appliance Val Metrics', fontsize=13)
 
     for row, app in enumerate(APPLIANCES):
         f1_series  = [m[app]['f1']  for m in history['val_metrics']]
@@ -540,7 +539,7 @@ def _plot_training(history, test_metrics, save_dir):
         ax_mae.legend(); ax_mae.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, 'pinn_lnn_implicit_ukdale_per_appliance.png'),
+    plt.savefig(os.path.join(save_dir, 'pinn_lnn_reststate_ukdale_per_appliance.png'),
                 dpi=150, bbox_inches='tight')
     plt.close()
 
@@ -557,7 +556,7 @@ if __name__ == "__main__":
             sys.exit(1)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_dir  = f"models/pinn_lnn_implicit_ukdale_{timestamp}"
+    save_dir  = f"models/pinn_lnn_reststate_ukdale_{timestamp}"
 
     data_dict = load_data()
 
