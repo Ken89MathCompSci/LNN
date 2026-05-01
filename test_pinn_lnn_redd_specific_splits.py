@@ -53,7 +53,7 @@ from utils import calculate_nilm_metrics, save_model
 # ---------------------------------------------------------------------------
 
 EPOCHS        = 80
-PATIENCE      = 20
+PATIENCE      = 30     # extended: need headroom for BCE to fire and improve MW
 LR            = 1e-3
 BATCH         = 32
 WIN           = 100
@@ -63,22 +63,22 @@ LAMBDA_PHYS   = 0.01   # physics loss weight — kept small so MSE dominates
 EPSILON_K     = 0.5    # k in ε = μ + k·σ  — REDD has large background residuals;
                        # k=0.5 keeps ε reasonable without disabling the constraint
 EPSILON_CAP   = 300.0  # hard ceiling (Watts) — prevents ε going inactive on noisy splits
-WARMUP_EPOCHS = 30     # Stage 1: MSE + physics only; BCE added after this epoch
+WARMUP_EPOCHS = 15     # shorter warmup so BCE fires while there are still epochs left
 BCE_ANNEAL    = 10     # ramp BCE from 0→full weight over this many epochs after warmup
 
 APPLIANCES = ['dish washer', 'fridge', 'microwave', 'washer dryer']
 
 THRESHOLDS = {
-    'dish washer':  10.0,
-    'fridge':       10.0,
-    'microwave':    10.0,
-    'washer dryer':  0.5,
+    'dish washer':  50.0,   # raised from 10W — DW idles near 0, active draw is 1200W+
+    'fridge':       50.0,   # raised from 10W — fridge compressor draw is 100-200W
+    'microwave':    50.0,   # raised from 10W — microwave is either OFF or 600W+
+    'washer dryer':  0.5,   # keep low — WD standby is already near-zero in REDD
 }
 
-# Gentle BCE — previous run showed that high LAMBDA/ALPHA caused a 10× MSE
-# spike at warmup end, collapsing DW/WD to always-ON.
-BCE_LAMBDA = {'dish washer': 0.1, 'fridge': 0.1, 'microwave': 0.1, 'washer dryer': 0.05}
-BCE_ALPHA  = {'dish washer': 1.5, 'fridge': 1.5, 'microwave': 2.0, 'washer dryer': 1.5}
+# MW uses stronger BCE: it's ~2-3% duty cycle, MSE alone always predicts OFF.
+# Other appliances stay gentle to avoid false-positive collapse.
+BCE_LAMBDA = {'dish washer': 0.1, 'fridge': 0.1, 'microwave': 0.3, 'washer dryer': 0.05}
+BCE_ALPHA  = {'dish washer': 1.5, 'fridge': 1.5, 'microwave': 5.0, 'washer dryer': 1.5}
 
 
 # ---------------------------------------------------------------------------
