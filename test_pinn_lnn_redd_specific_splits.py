@@ -60,8 +60,10 @@ WIN           = 100
 STRIDE        = 5
 
 LAMBDA_PHYS   = 0.01   # physics loss weight — kept small so MSE dominates
-EPSILON_K     = 1.0    # k in ε = μ + k·σ  (tighter → smaller k, looser → larger k)
-WARMUP_EPOCHS = 20     # Stage 1: MSE-only; physics + BCE added after this epoch
+EPSILON_K     = 0.5    # k in ε = μ + k·σ  — REDD has large background residuals;
+                       # k=0.5 keeps ε reasonable without disabling the constraint
+EPSILON_CAP   = 300.0  # hard ceiling (Watts) — prevents ε going inactive on noisy splits
+WARMUP_EPOCHS = 30     # longer warmup gives MSE time to stabilise before BCE fires
 
 APPLIANCES = ['dish washer', 'fridge', 'microwave', 'washer dryer']
 
@@ -72,23 +74,23 @@ THRESHOLDS = {
     'washer dryer':  0.5,
 }
 
-# REDD fridge cycles actively (higher BCE weight); microwave ON-states are short
-# but common enough to benefit from a small BCE push.
-BCE_LAMBDA = {'dish washer': 0.5, 'fridge': 0.5, 'microwave': 0.2, 'washer dryer': 0.0}
-BCE_ALPHA  = {'dish washer': 2.0, 'fridge': 3.0, 'microwave': 2.0, 'washer dryer': 1.0}
+# Gentle BCE — previous run showed that high LAMBDA/ALPHA caused a 10× MSE
+# spike at warmup end, collapsing DW/WD to always-ON.
+BCE_LAMBDA = {'dish washer': 0.1, 'fridge': 0.1, 'microwave': 0.1, 'washer dryer': 0.05}
+BCE_ALPHA  = {'dish washer': 1.5, 'fridge': 1.5, 'microwave': 2.0, 'washer dryer': 1.5}
 
 
 # ---------------------------------------------------------------------------
 # Adaptive ε
 # ---------------------------------------------------------------------------
 
-def compute_adaptive_epsilon(train_data, k=EPSILON_K):
+def compute_adaptive_epsilon(train_data, k=EPSILON_K, cap=EPSILON_CAP):
     """
-    ε = μ_residual + k · σ_residual  (raw Watts, computed on unscaled training data).
+    ε = min(μ_residual + k · σ_residual, cap)  (raw Watts, unscaled training data).
 
-    Uses only the positive residual (background loads unaccounted for by the
-    four monitored appliances). Negative residuals (measurement noise) are
-    clipped to zero so they don't drag the mean down.
+    The cap prevents ε from going so large that the physics constraint never
+    fires. REDD has high background residuals (many unlabelled loads), so
+    without a cap k=1.0 yields ε≈700 W which is effectively inactive.
     """
     mains   = train_data['main'].values.astype(np.float64)
     app_sum = np.zeros(len(mains), dtype=np.float64)
@@ -98,9 +100,10 @@ def compute_adaptive_epsilon(train_data, k=EPSILON_K):
     residuals = np.maximum(0.0, mains - app_sum)
     mu    = float(residuals.mean())
     sigma = float(residuals.std())
-    eps   = mu + k * sigma
+    eps   = min(mu + k * sigma, cap)
 
-    print(f"  Adaptive ε: μ={mu:.1f} W  σ={sigma:.1f} W  k={k}  → ε={eps:.1f} W")
+    print(f"  Adaptive ε: μ={mu:.1f} W  σ={sigma:.1f} W  k={k}  "
+          f"→ raw={mu + k * sigma:.1f} W  capped={eps:.1f} W")
     return eps
 
 
@@ -274,13 +277,14 @@ def compute_per_appliance_metrics(y_true, y_pred, y_scalers):
 
 def train_pinn_model(data_dict, save_dir,
                      hidden_size=64, dt=0.1,
-                     lambda_phys=LAMBDA_PHYS, epsilon_k=EPSILON_K):
+                     lambda_phys=LAMBDA_PHYS, epsilon_k=EPSILON_K,
+                     epsilon_cap=EPSILON_CAP):
     os.makedirs(save_dir, exist_ok=True)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
     # ── Adaptive ε from raw training data (before scaling) ──
-    epsilon_w = compute_adaptive_epsilon(data_dict['train'], k=epsilon_k)
+    epsilon_w = compute_adaptive_epsilon(data_dict['train'], k=epsilon_k, cap=epsilon_cap)
     print(f"λ_phys={lambda_phys}  ε={epsilon_w:.1f} W  hidden={hidden_size}  dt={dt}")
 
     # ── Sequences ──
@@ -607,6 +611,7 @@ if __name__ == "__main__":
         dt          = 0.1,
         lambda_phys = LAMBDA_PHYS,
         epsilon_k   = EPSILON_K,
+        epsilon_cap = EPSILON_CAP,
     )
 
     print(f"\nResults saved to {save_dir}")
