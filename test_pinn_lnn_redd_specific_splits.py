@@ -1,33 +1,34 @@
 """
-Physics-Informed LNN — Combined ODE Improvements — UKDALE specific splits.
+Physics-Informed LNN (PINN-LNN) for NILM — REDD specific splits.
 
-Three modifications applied together to the original PINN-LNN ODE cell:
+Same architecture as test_pinn_lnn_ukdale_specific_splits.py but adapted for
+the REDD dataset, with one key improvement: ε is computed adaptively from the
+training data rather than being a fixed constant.
 
-1. Implicit Euler integrator (unconditional stability)
-   Original explicit:  h ← h + (−h/τ + drive) · dt          [conditionally stable]
-   Implicit solved:    h ← (h + (drive + h_rest/τ) · dt) / (1 + dt/τ)
+Adaptive ε:
+    residual_n = max(0, P_agg_n - Σ p_i_true_n)
+    ε = μ_residual + k · σ_residual
 
-2. Learnable resting state h_rest  (non-zero baseline)
-   Original decay:  dh/dt = −h/τ + drive          → relaxes to 0
-   New decay:       dh/dt = −(h − h_rest)/τ + drive → relaxes to h_rest
-   Initialised at zero, learned during training.
+    A residual of zero means the monitored appliances account for all power;
+    a positive residual means some background load is present. Using μ + kσ
+    sets ε just above the typical background noise level so the physics
+    constraint only fires on genuine over-predictions.
 
-3. Hidden-state-dependent τ  (richer dynamics)
-   Original:  τ = softplus(τ_base) ⊙ sigmoid(W_τx · x_t)   [input-only]
-   New:       τ = softplus(τ_base + W_τh · h + W_τx · x_t)  [input + state]
-   τ now changes as the hidden state evolves — faster time constant when the
-   unit is far from its resting state, slower when settled.
+Architecture:
+    Input (batch, WIN, 1)  — scaled mains window
+         ↓
+    Shared AdvancedLiquidTimeLayer encoder (adaptive tau, input-dependent gate)
+         ↓
+    LayerNorm(hidden)
+         ↓
+    ┌────┬────┬────┬────┐
+    │ DW │ FR │ MW │ WD │  — one Linear head per appliance
+    └────┴────┴────┴────┘
+    output: (batch, 4)
 
-Combined ODE step (derived from implicit Euler on dh/dt = −(h−h_rest)/τ + drive):
-
-    τ     = softplus(τ_base  +  W_τh · h  +  W_τx · x_t)
-    drive = g ⊙ tanh(W_in · x_t + W_rec · h)
-    h_new = (h + (drive + h_rest / τ) · dt) / (1 + dt / τ)
-
-No clamp on h — the implicit denominator (1 + dt/τ) ≥ 1 bounds the update.
-
-Everything outside the ODE cell is unchanged from the original PINN-LNN script:
-loss, warmup schedule, BCE, Kirchhoff physics penalty, scalers, plots.
+Loss:
+    Stage 1 (epochs 1–WARMUP_EPOCHS): MSE only
+    Stage 2 (remaining epochs):       MSE + λ·L_phys + weighted BCE
 """
 
 import sys
@@ -51,16 +52,16 @@ from utils import calculate_nilm_metrics, save_model
 # Constants
 # ---------------------------------------------------------------------------
 
-EPOCHS      = 80
-PATIENCE    = 20
-LR          = 1e-3
-BATCH       = 32
-WIN         = 100
-STRIDE      = 5
+EPOCHS        = 80
+PATIENCE      = 20
+LR            = 1e-3
+BATCH         = 32
+WIN           = 100
+STRIDE        = 5
 
-LAMBDA_PHYS   = 0.01
-EPSILON_W     = 50.0
-WARMUP_EPOCHS = 20
+LAMBDA_PHYS   = 0.01   # physics loss weight — kept small so MSE dominates
+EPSILON_K     = 1.0    # k in ε = μ + k·σ  (tighter → smaller k, looser → larger k)
+WARMUP_EPOCHS = 20     # Stage 1: MSE-only; physics + BCE added after this epoch
 
 APPLIANCES = ['dish washer', 'fridge', 'microwave', 'washer dryer']
 
@@ -71,18 +72,51 @@ THRESHOLDS = {
     'washer dryer':  0.5,
 }
 
-BCE_LAMBDA = {'dish washer': 0.5, 'fridge': 0.3, 'microwave': 0.0, 'washer dryer': 0.0}
-BCE_ALPHA  = {'dish washer': 2.0, 'fridge': 2.0, 'microwave': 1.0, 'washer dryer': 1.0}
+# REDD fridge cycles actively (higher BCE weight); microwave ON-states are short
+# but common enough to benefit from a small BCE push.
+BCE_LAMBDA = {'dish washer': 0.5, 'fridge': 0.5, 'microwave': 0.2, 'washer dryer': 0.0}
+BCE_ALPHA  = {'dish washer': 2.0, 'fridge': 3.0, 'microwave': 2.0, 'washer dryer': 1.0}
 
 
 # ---------------------------------------------------------------------------
-# Physics Consistency Loss  (unchanged)
+# Adaptive ε
+# ---------------------------------------------------------------------------
+
+def compute_adaptive_epsilon(train_data, k=EPSILON_K):
+    """
+    ε = μ_residual + k · σ_residual  (raw Watts, computed on unscaled training data).
+
+    Uses only the positive residual (background loads unaccounted for by the
+    four monitored appliances). Negative residuals (measurement noise) are
+    clipped to zero so they don't drag the mean down.
+    """
+    mains   = train_data['main'].values.astype(np.float64)
+    app_sum = np.zeros(len(mains), dtype=np.float64)
+    for app in APPLIANCES:
+        app_sum += train_data[app].values.astype(np.float64)
+
+    residuals = np.maximum(0.0, mains - app_sum)
+    mu    = float(residuals.mean())
+    sigma = float(residuals.std())
+    eps   = mu + k * sigma
+
+    print(f"  Adaptive ε: μ={mu:.1f} W  σ={sigma:.1f} W  k={k}  → ε={eps:.1f} W")
+    return eps
+
+
+# ---------------------------------------------------------------------------
+# Physics Consistency Loss
 # ---------------------------------------------------------------------------
 
 class PhysicsConsistencyLoss(nn.Module):
-    """One-sided Kirchhoff penalty: ReLU(Σ p_hat_i_raw − P_agg_raw − ε)."""
+    """
+    Soft one-sided penalty:  ReLU(Σ p_hat_i_raw - P_agg_raw - ε)
 
-    def __init__(self, x_scaler, y_scalers, appliances, epsilon_w=EPSILON_W):
+    All arithmetic is in raw Watts via differentiable linear inverse-scaling.
+    MinMaxScaler inverse: x_raw = x_scaled * data_range_ + data_min_
+    """
+
+    def __init__(self, x_scaler, y_scalers, appliances, epsilon_w):
         super().__init__()
         self.epsilon = epsilon_w
 
@@ -97,31 +131,27 @@ class PhysicsConsistencyLoss(nn.Module):
         self.register_buffer('y_ranges', torch.tensor(y_ranges, dtype=torch.float32))
 
     def forward(self, x_mid_scaled, pred_scaled):
-        x_raw = x_mid_scaled * self.x_range + self.x_min
-        p_raw = pred_scaled  * self.y_ranges + self.y_mins
-        violation = F.relu(p_raw.sum(dim=1) - x_raw - self.epsilon)
+        """
+        Args:
+            x_mid_scaled: (batch,)        — scaled mains value at window midpoint
+            pred_scaled:  (batch, n_apps) — scaled appliance predictions
+        Returns:
+            scalar loss
+        """
+        x_raw     = x_mid_scaled * self.x_range + self.x_min   # (batch,)
+        p_raw     = pred_scaled  * self.y_ranges + self.y_mins  # (batch, n_apps)
+        p_sum     = p_raw.sum(dim=1)                            # (batch,)
+        violation = F.relu(p_sum - x_raw - self.epsilon)        # (batch,)
         return violation.mean()
 
 
 # ---------------------------------------------------------------------------
-# Combined ODE Model
+# Physics-Informed LNN Model
 # ---------------------------------------------------------------------------
 
-class CombinedPINNLiquidNetworkModel(nn.Module):
+class PhysicsInformedLiquidNetworkModel(nn.Module):
     """
-    Shared encoder with three combined ODE improvements:
-
-        τ     = softplus(τ_base  +  W_τh · h  +  W_τx · x_t)
-        drive = g ⊙ tanh(W_in · x_t  +  W_rec · h)
-        h_new = (h + (drive + h_rest / τ) · dt) / (1 + dt / τ)
-
-    Parameters added vs original:
-        W_τh     — hidden-to-tau  (hidden_size × hidden_size, no bias)
-        W_τx     — input-to-tau   (input_size  × hidden_size, no bias)
-        h_rest   — resting state  (hidden_size,)
-
-    Removed vs original:
-        tau_mod  — replaced by the additive W_τx term
+    Shared AdvancedLiquidTimeLayer encoder → per-appliance linear heads.
     """
 
     def __init__(self, input_size, hidden_size, n_appliances, dt=0.1):
@@ -130,21 +160,12 @@ class CombinedPINNLiquidNetworkModel(nn.Module):
         self.n_appliances = n_appliances
         self.dt           = dt
 
-        # Input projection and recurrent weights
         self.input_proj  = nn.Linear(input_size, hidden_size)
+        self.tau_base    = nn.Parameter(torch.ones(hidden_size))
+        self.tau_mod     = nn.Linear(input_size, hidden_size)
         self.rec_weights = nn.Parameter(torch.empty(hidden_size, hidden_size))
         nn.init.xavier_uniform_(self.rec_weights)
-
-        # Input gate
-        self.gate = nn.Linear(input_size + hidden_size, hidden_size)
-
-        # Time-constant: base + hidden contribution + input contribution
-        self.tau_base = nn.Parameter(torch.ones(hidden_size))
-        self.W_tau_h  = nn.Linear(hidden_size, hidden_size, bias=False)
-        self.W_tau_x  = nn.Linear(input_size,  hidden_size, bias=False)
-
-        # Learnable resting state — initialised at zero
-        self.h_rest = nn.Parameter(torch.zeros(hidden_size))
+        self.gate        = nn.Linear(input_size + hidden_size, hidden_size)
 
         self.norm = nn.LayerNorm(hidden_size)
 
@@ -157,7 +178,7 @@ class CombinedPINNLiquidNetworkModel(nn.Module):
         Args:
             x: (batch, seq_len, input_size)
         Returns:
-            (batch, n_appliances)
+            out: (batch, n_appliances)
         """
         batch_size, seq_len, _ = x.size()
         h = torch.zeros(batch_size, self.hidden_size, device=x.device)
@@ -165,20 +186,18 @@ class CombinedPINNLiquidNetworkModel(nn.Module):
         for t in range(seq_len):
             x_t = x[:, t, :]
 
-            # Candidate drive
-            z_in  = self.input_proj(x_t)
-            z_rec = torch.matmul(h, self.rec_weights)
-            g     = torch.sigmoid(self.gate(torch.cat([x_t, h], dim=1)))
-            drive = g * torch.tanh(z_in + z_rec)
+            input_proj = self.input_proj(x_t)
+            rec_proj   = torch.matmul(h, self.rec_weights)
 
-            # Hidden-state- and input-dependent τ
-            tau = F.softplus(
-                self.tau_base + self.W_tau_h(h) + self.W_tau_x(x_t)
-            ).clamp(min=1e-3)
+            tau_base = F.softplus(self.tau_base).unsqueeze(0)
+            tau_mod  = torch.sigmoid(self.tau_mod(x_t))
+            tau      = (tau_base * tau_mod).clamp(min=self.dt)
 
-            # Implicit Euler with resting-state decay
-            # Derived from: h_new = h + dt*(-(h_new - h_rest)/tau + drive)
-            h = (h + (drive + self.h_rest / tau) * self.dt) / (1.0 + self.dt / tau)
+            gate = torch.sigmoid(self.gate(torch.cat([x_t, h], dim=1)))
+
+            f_t = torch.tanh(input_proj + rec_proj)
+            dh  = ((-h / tau) + gate * f_t) * self.dt
+            h   = (h + dh).clamp(-10.0, 10.0)
 
         h = self.norm(h)
         return torch.cat([head(h) for head in self.heads], dim=1)
@@ -205,12 +224,12 @@ class MultiApplianceDataset(torch.utils.data.Dataset):
 # ---------------------------------------------------------------------------
 
 def load_data():
-    print("Loading UKDALE data...")
-    with open('data/ukdale/train_small.pkl', 'rb') as f:
+    print("Loading REDD data...")
+    with open('data/redd/train_small.pkl', 'rb') as f:
         train_data = pickle.load(f)[0]
-    with open('data/ukdale/val_small.pkl', 'rb') as f:
+    with open('data/redd/val_small.pkl', 'rb') as f:
         val_data = pickle.load(f)[0]
-    with open('data/ukdale/test_small.pkl', 'rb') as f:
+    with open('data/redd/test_small.pkl', 'rb') as f:
         test_data = pickle.load(f)[0]
 
     print(f"Train date range: {train_data.index.min()} to {train_data.index.max()}")
@@ -255,17 +274,21 @@ def compute_per_appliance_metrics(y_true, y_pred, y_scalers):
 
 def train_pinn_model(data_dict, save_dir,
                      hidden_size=64, dt=0.1,
-                     lambda_phys=LAMBDA_PHYS, epsilon_w=EPSILON_W):
+                     lambda_phys=LAMBDA_PHYS, epsilon_k=EPSILON_K):
     os.makedirs(save_dir, exist_ok=True)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
-    print(f"ODE: implicit + h_rest + h-dependent τ  "
-          f"dt={dt}  λ_phys={lambda_phys}  ε={epsilon_w}W  hidden={hidden_size}")
 
+    # ── Adaptive ε from raw training data (before scaling) ──
+    epsilon_w = compute_adaptive_epsilon(data_dict['train'], k=epsilon_k)
+    print(f"λ_phys={lambda_phys}  ε={epsilon_w:.1f} W  hidden={hidden_size}  dt={dt}")
+
+    # ── Sequences ──
     X_tr, Y_tr = create_sequences(data_dict['train'], WIN)
     X_va, Y_va = create_sequences(data_dict['val'],   WIN)
     X_te, Y_te = create_sequences(data_dict['test'],  WIN)
 
+    # ── Scaling ──
     x_scaler = MinMaxScaler()
     X_tr = x_scaler.fit_transform(X_tr.reshape(-1, 1)).reshape(X_tr.shape)
     X_va = x_scaler.transform(X_va.reshape(-1, 1)).reshape(X_va.shape)
@@ -296,7 +319,8 @@ def train_pinn_model(data_dict, save_dir,
     te_loader = torch.utils.data.DataLoader(
         MultiApplianceDataset(X_te, Y_te), batch_size=BATCH, shuffle=False, drop_last=False)
 
-    model = CombinedPINNLiquidNetworkModel(
+    # ── Model + losses ──
+    model = PhysicsInformedLiquidNetworkModel(
         input_size=1, hidden_size=hidden_size,
         n_appliances=len(APPLIANCES), dt=dt,
     ).to(device)
@@ -321,21 +345,22 @@ def train_pinn_model(data_dict, save_dir,
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model parameters: {n_params:,}")
-    print("Starting PINN-LNN (combined ODE) training...")
+    print("Starting PINN-LNN training (all appliances simultaneously)...")
 
     for epoch in range(EPOCHS):
+        # ── Training ──
         model.train()
         ep_mse = ep_phys = ep_total = 0.0
-        progress_bar = tqdm(tr_loader, desc=f"Epoch {epoch+1}/{EPOCHS}", leave=False)
-
+        progress_bar = tqdm(tr_loader,
+                            desc=f"Epoch {epoch+1}/{EPOCHS}", leave=False)
         for xb, yb in progress_bar:
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
 
-            pred = model(xb)
-            mse_loss = mse_criterion(pred, yb)
+            pred = model(xb)                          # (batch, n_apps)
 
-            x_mid     = xb[:, WIN // 2, 0]
+            mse_loss  = mse_criterion(pred, yb)
+            x_mid     = xb[:, WIN // 2, 0]           # (batch,)
             phys_loss = phys_criterion(x_mid, pred)
 
             if epoch < WARMUP_EPOCHS:
@@ -362,7 +387,7 @@ def train_pinn_model(data_dict, save_dir,
             ep_phys  += phys_loss.item()
             ep_total += loss.item()
             progress_bar.set_postfix({
-                'mse':  f'{mse_loss.item():.5f}',
+                'mse': f'{mse_loss.item():.5f}',
                 'phys': f'{phys_loss.item():.5f}',
             })
 
@@ -373,6 +398,7 @@ def train_pinn_model(data_dict, save_dir,
         history['train_phys'].append(avg_tr_phys)
         history['train_loss'].append(avg_tr_total)
 
+        # ── Validation ──
         model.eval()
         vl_mse = vl_phys = vl_total = 0.0
         val_preds, val_trues = [], []
@@ -404,7 +430,9 @@ def train_pinn_model(data_dict, save_dir,
 
         y_pred_all = np.concatenate(val_preds)
         y_true_all = np.concatenate(val_trues)
-        per_app_metrics = compute_per_appliance_metrics(y_true_all, y_pred_all, y_scalers)
+
+        per_app_metrics = compute_per_appliance_metrics(
+            y_true_all, y_pred_all, y_scalers)
         history['val_metrics'].append(per_app_metrics)
 
         avg_f1  = np.mean([per_app_metrics[a]['f1']  for a in APPLIANCES])
@@ -435,6 +463,7 @@ def train_pinn_model(data_dict, save_dir,
 
     print("Training completed!")
 
+    # ── Test evaluation ──
     if best_state is not None:
         model.load_state_dict(best_state)
     model.eval()
@@ -447,6 +476,7 @@ def train_pinn_model(data_dict, save_dir,
 
     y_pred_te = np.concatenate(test_preds)
     y_true_te = np.concatenate(test_trues)
+
     test_metrics = compute_per_appliance_metrics(y_true_te, y_pred_te, y_scalers)
 
     print(f"\n{'Appliance':<15} {'F1':>8} {'Precision':>10} {'Recall':>8} "
@@ -457,29 +487,31 @@ def train_pinn_model(data_dict, save_dir,
         print(f"{app:<15} {m['f1']:>8.4f} {m['precision']:>10.4f} "
               f"{m['recall']:>8.4f} {m['mae']:>8.2f} {m['sae']:>8.4f}")
 
+    # ── Plots ──
     _plot_training(history, test_metrics, save_dir)
 
+    # ── Save JSON ──
     config = {
-        'dataset': 'UKDALE',
-        'model': 'CombinedPINNLiquidNetworkModel',
-        'description': 'implicit Euler + h_rest + h-dependent τ + per-appliance heads + L_phys',
-        'ode': 'tau=softplus(tau_base+W_tau_h@h+W_tau_x@x); h=(h+(drive+h_rest/tau)*dt)/(1+dt/tau)',
-        'loss': f'MSE + {lambda_phys} * PhysicsConsistency(ε={epsilon_w}W)',
+        'dataset': 'REDD',
+        'model': 'PhysicsInformedLiquidNetworkModel',
+        'description': 'shared AdvancedLiquidTimeLayer encoder + per-appliance heads + adaptive L_phys',
+        'loss': f'MSE + {lambda_phys} * PhysicsConsistency(ε={epsilon_w:.1f}W, k={epsilon_k})',
         'window_size': WIN,
+        'adaptive_epsilon': {'mu_plus_k_sigma': epsilon_w, 'k': epsilon_k},
         'model_params': {
             'input_size': 1, 'hidden_size': hidden_size,
             'n_appliances': len(APPLIANCES), 'dt': dt,
         },
         'train_params': {
             'lr': LR, 'epochs': EPOCHS, 'patience': PATIENCE,
-            'lambda_phys': lambda_phys, 'epsilon_w': epsilon_w,
+            'lambda_phys': lambda_phys, 'epsilon_w': epsilon_w, 'epsilon_k': epsilon_k,
         },
         'test_metrics': {
             app: {k: float(v) for k, v in m.items()}
             for app, m in test_metrics.items()
         },
     }
-    with open(os.path.join(save_dir, 'pinn_lnn_combined_ukdale_results.json'),
+    with open(os.path.join(save_dir, 'pinn_lnn_redd_results.json'),
               'w', encoding='utf-8') as f:
         json.dump(config, f, indent=4)
 
@@ -517,13 +549,13 @@ def _plot_training(history, test_metrics, save_dir):
     plt.legend(); plt.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, 'pinn_lnn_combined_ukdale_loss.png'),
+    plt.savefig(os.path.join(save_dir, 'pinn_lnn_redd_loss.png'),
                 dpi=150, bbox_inches='tight')
     plt.close()
 
     fig, axes = plt.subplots(len(APPLIANCES), 2,
                              figsize=(12, 4 * len(APPLIANCES)))
-    fig.suptitle('PINN-LNN Combined ODE UKDALE — Per-Appliance Val Metrics', fontsize=13)
+    fig.suptitle('PINN-LNN REDD — Per-Appliance Val Metrics', fontsize=13)
 
     for row, app in enumerate(APPLIANCES):
         f1_series  = [m[app]['f1']  for m in history['val_metrics']]
@@ -547,7 +579,7 @@ def _plot_training(history, test_metrics, save_dir):
         ax_mae.legend(); ax_mae.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, 'pinn_lnn_combined_ukdale_per_appliance.png'),
+    plt.savefig(os.path.join(save_dir, 'pinn_lnn_redd_per_appliance.png'),
                 dpi=150, bbox_inches='tight')
     plt.close()
 
@@ -557,24 +589,24 @@ def _plot_training(history, test_metrics, save_dir):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    for f in ['data/ukdale/train_small.pkl', 'data/ukdale/val_small.pkl',
-              'data/ukdale/test_small.pkl']:
+    for f in ['data/redd/train_small.pkl', 'data/redd/val_small.pkl',
+              'data/redd/test_small.pkl']:
         if not os.path.exists(f):
             print(f"Error: {f} not found!")
             sys.exit(1)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_dir  = f"models/pinn_lnn_combined_ukdale_{timestamp}"
+    save_dir  = f"models/pinn_lnn_redd_{timestamp}"
 
     data_dict = load_data()
 
     test_metrics, history = train_pinn_model(
         data_dict,
-        save_dir     = save_dir,
-        hidden_size  = 64,
-        dt           = 0.1,
-        lambda_phys  = LAMBDA_PHYS,
-        epsilon_w    = EPSILON_W,
+        save_dir    = save_dir,
+        hidden_size = 64,
+        dt          = 0.1,
+        lambda_phys = LAMBDA_PHYS,
+        epsilon_k   = EPSILON_K,
     )
 
     print(f"\nResults saved to {save_dir}")
