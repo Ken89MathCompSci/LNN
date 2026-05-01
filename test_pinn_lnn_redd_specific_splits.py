@@ -63,7 +63,8 @@ LAMBDA_PHYS   = 0.01   # physics loss weight — kept small so MSE dominates
 EPSILON_K     = 0.5    # k in ε = μ + k·σ  — REDD has large background residuals;
                        # k=0.5 keeps ε reasonable without disabling the constraint
 EPSILON_CAP   = 300.0  # hard ceiling (Watts) — prevents ε going inactive on noisy splits
-WARMUP_EPOCHS = 30     # longer warmup gives MSE time to stabilise before BCE fires
+WARMUP_EPOCHS = 30     # Stage 1: MSE + physics only; BCE added after this epoch
+BCE_ANNEAL    = 10     # ramp BCE from 0→full weight over this many epochs after warmup
 
 APPLIANCES = ['dish washer', 'fridge', 'microwave', 'washer dryer']
 
@@ -343,7 +344,7 @@ def train_pinn_model(data_dict, save_dir,
         'val_loss':   [], 'val_mse':   [], 'val_phys':   [],
         'val_metrics': [],
     }
-    best_val_loss = float('inf')
+    best_val_loss = -float('inf')   # maximising avg val F1
     best_state    = None
     counter       = 0
 
@@ -368,8 +369,10 @@ def train_pinn_model(data_dict, save_dir,
             phys_loss = phys_criterion(x_mid, pred)
 
             if epoch < WARMUP_EPOCHS:
-                loss = mse_loss
+                loss = mse_loss + lambda_phys * phys_loss
             else:
+                # Anneal BCE from 0→1 over BCE_ANNEAL epochs to prevent gradient spike
+                bce_scale = min(1.0, (epoch - WARMUP_EPOCHS + 1) / BCE_ANNEAL)
                 bce_loss = torch.tensor(0.0, device=device)
                 for i, app in enumerate(APPLIANCES):
                     if BCE_LAMBDA[app] > 0:
@@ -381,7 +384,7 @@ def train_pinn_model(data_dict, save_dir,
                                              torch.ones_like(y_bin))
                         bce_loss = bce_loss + BCE_LAMBDA[app] * F.binary_cross_entropy(
                             pred_i, y_bin, weight=w)
-                loss = mse_loss + lambda_phys * phys_loss + bce_loss
+                loss = mse_loss + lambda_phys * phys_loss + bce_scale * bce_loss
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -430,7 +433,7 @@ def train_pinn_model(data_dict, save_dir,
         history['val_phys'].append(avg_va_phys)
         history['val_loss'].append(avg_va_total)
 
-        scheduler.step(avg_va_mse)
+        scheduler.step(avg_va_mse)   # LR decay on MSE — less noisy than F1
 
         y_pred_all = np.concatenate(val_preds)
         y_true_all = np.concatenate(val_trues)
@@ -455,8 +458,8 @@ def train_pinn_model(data_dict, save_dir,
                   f"P={m['precision']:.4f}  R={m['recall']:.4f}  "
                   f"MAE={m['mae']:.2f}  SAE={m['sae']:.4f}")
 
-        if avg_va_mse < best_val_loss:
-            best_val_loss = avg_va_mse
+        if avg_f1 > best_val_loss:
+            best_val_loss = avg_f1
             best_state    = {k: v.clone() for k, v in model.state_dict().items()}
             counter       = 0
         else:
