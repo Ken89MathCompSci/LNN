@@ -163,7 +163,7 @@ class PhysicsConsistencyLoss(nn.Module):
         x_raw = x_mid_scaled * self.x_range + self.x_min           # (batch,)
         p_raw = pred_scaled  * self.y_ranges + self.y_mins          # (batch, n_apps)
         # clamp: no negative watts, no single appliance exceeding aggregate
-        p_raw = p_raw.clamp(min=0.0, max=x_raw.unsqueeze(1))
+        p_raw = torch.minimum(p_raw.clamp(min=0.0), x_raw.unsqueeze(1))
         p_sum = p_raw.sum(dim=1)                                    # (batch,)
 
         over  = F.relu(p_sum - x_raw - eps_per_sample)
