@@ -59,10 +59,11 @@ BATCH         = 32
 WIN           = 100
 STRIDE        = 5
 
-LAMBDA_PHYS   = 0.01   # physics loss weight — kept small so MSE dominates
-EPSILON_K     = 0.5    # k in ε = μ + k·σ  — REDD has large background residuals;
-                       # k=0.5 keeps ε reasonable without disabling the constraint
-EPSILON_CAP   = 300.0  # hard ceiling (Watts) — prevents ε going inactive on noisy splits
+LAMBDA_PHYS   = 0.01   # physics loss weight
+BETA_PHYS     = 0.1    # underestimation penalty weight (two-sided physics loss)
+ALPHA_L1      = 0.3    # L1 fraction in regression loss (1-ALPHA_L1 is MSE fraction)
+EPSILON_K     = 0.5    # k in ε = μ + k·σ
+EPSILON_CAP   = 150.0  # tighter ceiling — forces active physics constraint
 WARMUP_EPOCHS = 15     # shorter warmup so BCE fires while there are still epochs left
 BCE_ANNEAL    = 10     # ramp BCE from 0→full weight over this many epochs after warmup
 
@@ -75,10 +76,10 @@ THRESHOLDS = {
     'washer dryer':  0.5,   # keep low — WD standby is already near-zero in REDD
 }
 
-# MW uses stronger BCE: it's ~2-3% duty cycle, MSE alone always predicts OFF.
-# Other appliances stay gentle to avoid false-positive collapse.
-BCE_LAMBDA = {'dish washer': 0.1, 'fridge': 0.1, 'microwave': 0.3, 'washer dryer': 0.05}
-BCE_ALPHA  = {'dish washer': 1.5, 'fridge': 1.5, 'microwave': 5.0, 'washer dryer': 1.5}
+# BCE applied to state_head (sigmoid) — separated from regression so it can't
+# distort power magnitude. Reduced weights after dual-head decoupling.
+BCE_LAMBDA = {'dish washer': 0.05, 'fridge': 0.05, 'microwave': 0.15, 'washer dryer': 0.02}
+BCE_ALPHA  = {'dish washer': 1.5,  'fridge': 1.5,  'microwave': 3.0,  'washer dryer': 1.5}
 
 
 # ---------------------------------------------------------------------------
@@ -147,20 +148,27 @@ class PhysicsConsistencyLoss(nn.Module):
         self.register_buffer('y_mins',   torch.tensor(y_mins,   dtype=torch.float32))
         self.register_buffer('y_ranges', torch.tensor(y_ranges, dtype=torch.float32))
 
-    def forward(self, x_mid_scaled, pred_scaled, eps_per_sample):
+    def forward(self, x_mid_scaled, pred_scaled, eps_per_sample, beta=BETA_PHYS):
         """
+        Two-sided soft penalty:
+            over:  ReLU(Σp_i - P_agg - ε)          — penalise over-prediction
+            under: ReLU(P_agg - Σp_i - ε/2) × β   — penalise severe under-prediction
+
         Args:
-            x_mid_scaled:   (batch,)        — scaled mains value at window midpoint
-            pred_scaled:    (batch, n_apps) — scaled appliance predictions
-            eps_per_sample: (batch,)        — per-sample tolerance in raw Watts
-        Returns:
-            scalar loss
+            x_mid_scaled:   (batch,)
+            pred_scaled:    (batch, n_apps)
+            eps_per_sample: (batch,)  — per-hour upper tolerance (raw W)
+            beta:           float     — relative weight of under-penalty
         """
-        x_raw     = x_mid_scaled * self.x_range + self.x_min   # (batch,)
-        p_raw     = pred_scaled  * self.y_ranges + self.y_mins  # (batch, n_apps)
-        p_sum     = p_raw.sum(dim=1)                            # (batch,)
-        violation = F.relu(p_sum - x_raw - eps_per_sample)      # (batch,)
-        return violation.mean()
+        x_raw = x_mid_scaled * self.x_range + self.x_min           # (batch,)
+        p_raw = pred_scaled  * self.y_ranges + self.y_mins          # (batch, n_apps)
+        # clamp: no negative watts, no single appliance exceeding aggregate
+        p_raw = p_raw.clamp(min=0.0, max=x_raw.unsqueeze(1))
+        p_sum = p_raw.sum(dim=1)                                    # (batch,)
+
+        over  = F.relu(p_sum - x_raw - eps_per_sample)
+        under = F.relu(x_raw - p_sum - eps_per_sample * 0.5)
+        return over.mean() + beta * under.mean()
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +195,14 @@ class PhysicsInformedLiquidNetworkModel(nn.Module):
 
         self.norm = nn.LayerNorm(hidden_size)
 
-        self.heads = nn.ModuleList([
+        # Dual heads per appliance:
+        #   power_head — regression (raw scaled watts)
+        #   state_head — classification (sigmoid → ON probability)
+        # Combined prediction: power * state, so OFF states yield ~0 watts.
+        self.power_heads = nn.ModuleList([
+            nn.Linear(hidden_size, 1) for _ in range(n_appliances)
+        ])
+        self.state_heads = nn.ModuleList([
             nn.Linear(hidden_size, 1) for _ in range(n_appliances)
         ])
 
@@ -196,7 +211,8 @@ class PhysicsInformedLiquidNetworkModel(nn.Module):
         Args:
             x: (batch, seq_len, input_size)
         Returns:
-            out: (batch, n_appliances)
+            combined: (batch, n_appliances) — power × state, used for MSE/physics
+            state:    (batch, n_appliances) — ON probability in [0,1], used for BCE
         """
         batch_size, seq_len, _ = x.size()
         h = torch.zeros(batch_size, self.hidden_size, device=x.device)
@@ -218,7 +234,10 @@ class PhysicsInformedLiquidNetworkModel(nn.Module):
             h   = (h + dh).clamp(-10.0, 10.0)
 
         h = self.norm(h)
-        return torch.cat([head(h) for head in self.heads], dim=1)
+        power = torch.cat([head(h) for head in self.power_heads], dim=1)   # (batch, n_apps)
+        state = torch.sigmoid(
+            torch.cat([head(h) for head in self.state_heads], dim=1))      # (batch, n_apps)
+        return power * state, state
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +370,7 @@ def train_pinn_model(data_dict, save_dir,
     ).to(device)
 
     mse_criterion  = nn.MSELoss()
+    l1_criterion   = nn.L1Loss()
     phys_criterion = PhysicsConsistencyLoss(x_scaler, y_scalers, APPLIANCES).to(device)
 
     # Per-hour ε schedule as a device tensor — indexed by hour each batch
@@ -384,40 +404,43 @@ def train_pinn_model(data_dict, save_dir,
             hb = hb.to(device)
             optimizer.zero_grad()
 
-            pred = model(xb)                          # (batch, n_apps)
+            pred_combined, state_pred = model(xb)    # (batch, n_apps) each
 
-            mse_loss  = mse_criterion(pred, yb)
+            # 0.7·MSE + 0.3·L1 — aligns training closer to MAE evaluation metric
+            reg_loss  = (1 - ALPHA_L1) * mse_criterion(pred_combined, yb) \
+                      + ALPHA_L1       * l1_criterion(pred_combined, yb)
             x_mid     = xb[:, WIN // 2, 0]           # (batch,)
             eps_batch = eps_tensor[hb]                # (batch,) — per-sample ε
-            phys_loss = phys_criterion(x_mid, pred, eps_batch)
+            phys_loss = phys_criterion(x_mid, pred_combined, eps_batch)
 
             if epoch < WARMUP_EPOCHS:
-                loss = mse_loss + lambda_phys * phys_loss
+                loss = reg_loss + lambda_phys * phys_loss
             else:
                 # Anneal BCE from 0→1 over BCE_ANNEAL epochs to prevent gradient spike
                 bce_scale = min(1.0, (epoch - WARMUP_EPOCHS + 1) / BCE_ANNEAL)
                 bce_loss = torch.tensor(0.0, device=device)
                 for i, app in enumerate(APPLIANCES):
                     if BCE_LAMBDA[app] > 0:
-                        pred_i = pred[:, i].clamp(1e-7, 1 - 1e-7)
-                        thr_s  = thresholds_scaled[i]
-                        y_bin  = (yb[:, i] > thr_s).float()
-                        w      = torch.where(y_bin == 1,
-                                             torch.full_like(y_bin, BCE_ALPHA[app]),
-                                             torch.ones_like(y_bin))
+                        # state_pred already sigmoid — no clamping needed
+                        state_i = state_pred[:, i].clamp(1e-7, 1 - 1e-7)
+                        thr_s   = thresholds_scaled[i]
+                        y_bin   = (yb[:, i] > thr_s).float()
+                        w       = torch.where(y_bin == 1,
+                                              torch.full_like(y_bin, BCE_ALPHA[app]),
+                                              torch.ones_like(y_bin))
                         bce_loss = bce_loss + BCE_LAMBDA[app] * F.binary_cross_entropy(
-                            pred_i, y_bin, weight=w)
-                loss = mse_loss + lambda_phys * phys_loss + bce_scale * bce_loss
+                            state_i, y_bin, weight=w)
+                loss = reg_loss + lambda_phys * phys_loss + bce_scale * bce_loss
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
-            ep_mse   += mse_loss.item()
+            ep_mse   += reg_loss.item()
             ep_phys  += phys_loss.item()
             ep_total += loss.item()
             progress_bar.set_postfix({
-                'mse': f'{mse_loss.item():.5f}',
+                'reg': f'{reg_loss.item():.5f}',
                 'phys': f'{phys_loss.item():.5f}',
             })
 
@@ -437,18 +460,19 @@ def train_pinn_model(data_dict, save_dir,
             for xb, yb, hb in va_loader:
                 xb, yb = xb.to(device), yb.to(device)
                 hb = hb.to(device)
-                pred = model(xb)
+                pred_combined, _ = model(xb)
 
-                mse_loss  = mse_criterion(pred, yb)
+                reg_loss  = (1 - ALPHA_L1) * mse_criterion(pred_combined, yb) \
+                          + ALPHA_L1       * l1_criterion(pred_combined, yb)
                 x_mid     = xb[:, WIN // 2, 0]
                 eps_batch = eps_tensor[hb]
-                phys_loss = phys_criterion(x_mid, pred, eps_batch)
-                loss      = mse_loss + lambda_phys * phys_loss
+                phys_loss = phys_criterion(x_mid, pred_combined, eps_batch)
+                loss      = reg_loss + lambda_phys * phys_loss
 
-                vl_mse   += mse_loss.item()
+                vl_mse   += reg_loss.item()
                 vl_phys  += phys_loss.item()
                 vl_total += loss.item()
-                val_preds.append(pred.cpu().numpy())
+                val_preds.append(pred_combined.cpu().numpy())
                 val_trues.append(yb.cpu().numpy())
 
         avg_va_mse   = vl_mse   / len(va_loader)
@@ -503,7 +527,8 @@ def train_pinn_model(data_dict, save_dir,
     test_preds, test_trues = [], []
     with torch.no_grad():
         for xb, yb, _ in te_loader:
-            test_preds.append(model(xb.to(device)).cpu().numpy())
+            pred_combined, _ = model(xb.to(device))
+            test_preds.append(pred_combined.cpu().numpy())
             test_trues.append(yb.cpu().numpy())
 
     y_pred_te = np.concatenate(test_preds)
