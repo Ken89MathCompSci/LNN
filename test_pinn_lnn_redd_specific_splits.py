@@ -85,13 +85,16 @@ BCE_ALPHA  = {'dish washer': 1.5, 'fridge': 1.5, 'microwave': 5.0, 'washer dryer
 # Adaptive ε
 # ---------------------------------------------------------------------------
 
-def compute_adaptive_epsilon(train_data, k=EPSILON_K, cap=EPSILON_CAP):
+def compute_epsilon_schedule(train_data, k=EPSILON_K, cap=EPSILON_CAP, min_samples=20):
     """
-    ε = min(μ_residual + k · σ_residual, cap)  (raw Watts, unscaled training data).
+    Returns a (24,) float32 array — one ε per hour of day.
 
-    The cap prevents ε from going so large that the physics constraint never
-    fires. REDD has high background residuals (many unlabelled loads), so
-    without a cap k=1.0 yields ε≈700 W which is effectively inactive.
+    For each hour h:
+        ε(h) = min(μ_residual(h) + k·σ_residual(h), cap)
+
+    Hours with fewer than min_samples fall back to the global ε, which avoids
+    unstable estimates from sparse night-time data.  The schedule is printed
+    at startup so it is easy to audit.
     """
     mains   = train_data['main'].values.astype(np.float64)
     app_sum = np.zeros(len(mains), dtype=np.float64)
@@ -99,13 +102,24 @@ def compute_adaptive_epsilon(train_data, k=EPSILON_K, cap=EPSILON_CAP):
         app_sum += train_data[app].values.astype(np.float64)
 
     residuals = np.maximum(0.0, mains - app_sum)
-    mu    = float(residuals.mean())
-    sigma = float(residuals.std())
-    eps   = min(mu + k * sigma, cap)
+    hours     = train_data.index.hour   # local hour (0-23), works with tz-aware index
 
-    print(f"  Adaptive ε: μ={mu:.1f} W  σ={sigma:.1f} W  k={k}  "
-          f"→ raw={mu + k * sigma:.1f} W  capped={eps:.1f} W")
-    return eps
+    global_eps = min(float(residuals.mean() + k * residuals.std()), cap)
+    schedule   = np.full(24, global_eps, dtype=np.float32)
+
+    for h in range(24):
+        mask = (hours == h)
+        if mask.sum() >= min_samples:
+            r = residuals[mask]
+            schedule[h] = float(min(r.mean() + k * r.std(), cap))
+
+    print("  Per-hour ε schedule (W):")
+    for h in range(0, 24, 6):
+        row = "  " + "  ".join(
+            f"{h+j:02d}h={schedule[h+j]:.0f}" for j in range(6) if h + j < 24
+        )
+        print(row)
+    return schedule
 
 
 # ---------------------------------------------------------------------------
@@ -120,9 +134,8 @@ class PhysicsConsistencyLoss(nn.Module):
     MinMaxScaler inverse: x_raw = x_scaled * data_range_ + data_min_
     """
 
-    def __init__(self, x_scaler, y_scalers, appliances, epsilon_w):
+    def __init__(self, x_scaler, y_scalers, appliances):
         super().__init__()
-        self.epsilon = epsilon_w
 
         x_min   = float(x_scaler.data_min_[0])
         x_range = float(x_scaler.data_range_[0])
@@ -134,18 +147,19 @@ class PhysicsConsistencyLoss(nn.Module):
         self.register_buffer('y_mins',   torch.tensor(y_mins,   dtype=torch.float32))
         self.register_buffer('y_ranges', torch.tensor(y_ranges, dtype=torch.float32))
 
-    def forward(self, x_mid_scaled, pred_scaled):
+    def forward(self, x_mid_scaled, pred_scaled, eps_per_sample):
         """
         Args:
-            x_mid_scaled: (batch,)        — scaled mains value at window midpoint
-            pred_scaled:  (batch, n_apps) — scaled appliance predictions
+            x_mid_scaled:   (batch,)        — scaled mains value at window midpoint
+            pred_scaled:    (batch, n_apps) — scaled appliance predictions
+            eps_per_sample: (batch,)        — per-sample tolerance in raw Watts
         Returns:
             scalar loss
         """
         x_raw     = x_mid_scaled * self.x_range + self.x_min   # (batch,)
         p_raw     = pred_scaled  * self.y_ranges + self.y_mins  # (batch, n_apps)
         p_sum     = p_raw.sum(dim=1)                            # (batch,)
-        violation = F.relu(p_sum - x_raw - self.epsilon)        # (batch,)
+        violation = F.relu(p_sum - x_raw - eps_per_sample)      # (batch,)
         return violation.mean()
 
 
@@ -212,15 +226,16 @@ class PhysicsInformedLiquidNetworkModel(nn.Module):
 # ---------------------------------------------------------------------------
 
 class MultiApplianceDataset(torch.utils.data.Dataset):
-    def __init__(self, X, Y):
+    def __init__(self, X, Y, H):
         self.X = torch.FloatTensor(X)
         self.Y = torch.FloatTensor(Y)
+        self.H = torch.LongTensor(H)   # hour-of-day index (0-23) for each window
 
     def __len__(self):
         return len(self.X)
 
     def __getitem__(self, idx):
-        return self.X[idx], self.Y[idx]
+        return self.X[idx], self.Y[idx], self.H[idx]
 
 
 # ---------------------------------------------------------------------------
@@ -244,17 +259,22 @@ def load_data():
 
 
 def create_sequences(data, window_size=WIN):
-    """Midpoint targeting — y[i] is the appliance values at the window centre."""
+    """Midpoint targeting — y[i] is the appliance values at the window centre.
+    Also returns H: the local hour-of-day at the midpoint, used for time-aware ε.
+    """
     mains    = data['main'].values
     app_vals = {app: data[app].values for app in APPLIANCES}
-    X, Y = [], []
+    hours    = data.index.hour          # tz-aware index → local hour (0-23)
+    X, Y, H = [], [], []
     for i in range(0, len(mains) - window_size, STRIDE):
         X.append(mains[i:i + window_size])
         mid = i + window_size // 2
         Y.append([app_vals[app][mid] for app in APPLIANCES])
+        H.append(int(hours[mid]))
     return (
         np.array(X, dtype=np.float32).reshape(-1, window_size, 1),
         np.array(Y, dtype=np.float32),
+        np.array(H, dtype=np.int64),
     )
 
 
@@ -284,14 +304,14 @@ def train_pinn_model(data_dict, save_dir,
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
-    # ── Adaptive ε from raw training data (before scaling) ──
-    epsilon_w = compute_adaptive_epsilon(data_dict['train'], k=epsilon_k, cap=epsilon_cap)
-    print(f"λ_phys={lambda_phys}  ε={epsilon_w:.1f} W  hidden={hidden_size}  dt={dt}")
+    # ── Per-hour ε schedule from raw training data (before scaling) ──
+    eps_schedule = compute_epsilon_schedule(data_dict['train'], k=epsilon_k, cap=epsilon_cap)
+    print(f"λ_phys={lambda_phys}  hidden={hidden_size}  dt={dt}")
 
-    # ── Sequences ──
-    X_tr, Y_tr = create_sequences(data_dict['train'], WIN)
-    X_va, Y_va = create_sequences(data_dict['val'],   WIN)
-    X_te, Y_te = create_sequences(data_dict['test'],  WIN)
+    # ── Sequences (now also returns hour-of-day H for each window) ──
+    X_tr, Y_tr, H_tr = create_sequences(data_dict['train'], WIN)
+    X_va, Y_va, H_va = create_sequences(data_dict['val'],   WIN)
+    X_te, Y_te, H_te = create_sequences(data_dict['test'],  WIN)
 
     # ── Scaling ──
     x_scaler = MinMaxScaler()
@@ -318,11 +338,11 @@ def train_pinn_model(data_dict, save_dir,
     print(f"Test:  {X_te.shape} → {Y_te.shape}")
 
     tr_loader = torch.utils.data.DataLoader(
-        MultiApplianceDataset(X_tr, Y_tr), batch_size=BATCH, shuffle=True,  drop_last=False)
+        MultiApplianceDataset(X_tr, Y_tr, H_tr), batch_size=BATCH, shuffle=True,  drop_last=False)
     va_loader = torch.utils.data.DataLoader(
-        MultiApplianceDataset(X_va, Y_va), batch_size=BATCH, shuffle=False, drop_last=False)
+        MultiApplianceDataset(X_va, Y_va, H_va), batch_size=BATCH, shuffle=False, drop_last=False)
     te_loader = torch.utils.data.DataLoader(
-        MultiApplianceDataset(X_te, Y_te), batch_size=BATCH, shuffle=False, drop_last=False)
+        MultiApplianceDataset(X_te, Y_te, H_te), batch_size=BATCH, shuffle=False, drop_last=False)
 
     # ── Model + losses ──
     model = PhysicsInformedLiquidNetworkModel(
@@ -331,9 +351,10 @@ def train_pinn_model(data_dict, save_dir,
     ).to(device)
 
     mse_criterion  = nn.MSELoss()
-    phys_criterion = PhysicsConsistencyLoss(
-        x_scaler, y_scalers, APPLIANCES, epsilon_w=epsilon_w
-    ).to(device)
+    phys_criterion = PhysicsConsistencyLoss(x_scaler, y_scalers, APPLIANCES).to(device)
+
+    # Per-hour ε schedule as a device tensor — indexed by hour each batch
+    eps_tensor = torch.tensor(eps_schedule, dtype=torch.float32, device=device)  # (24,)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -358,15 +379,17 @@ def train_pinn_model(data_dict, save_dir,
         ep_mse = ep_phys = ep_total = 0.0
         progress_bar = tqdm(tr_loader,
                             desc=f"Epoch {epoch+1}/{EPOCHS}", leave=False)
-        for xb, yb in progress_bar:
+        for xb, yb, hb in progress_bar:
             xb, yb = xb.to(device), yb.to(device)
+            hb = hb.to(device)
             optimizer.zero_grad()
 
             pred = model(xb)                          # (batch, n_apps)
 
             mse_loss  = mse_criterion(pred, yb)
             x_mid     = xb[:, WIN // 2, 0]           # (batch,)
-            phys_loss = phys_criterion(x_mid, pred)
+            eps_batch = eps_tensor[hb]                # (batch,) — per-sample ε
+            phys_loss = phys_criterion(x_mid, pred, eps_batch)
 
             if epoch < WARMUP_EPOCHS:
                 loss = mse_loss + lambda_phys * phys_loss
@@ -411,13 +434,15 @@ def train_pinn_model(data_dict, save_dir,
         val_preds, val_trues = [], []
 
         with torch.no_grad():
-            for xb, yb in va_loader:
+            for xb, yb, hb in va_loader:
                 xb, yb = xb.to(device), yb.to(device)
+                hb = hb.to(device)
                 pred = model(xb)
 
                 mse_loss  = mse_criterion(pred, yb)
                 x_mid     = xb[:, WIN // 2, 0]
-                phys_loss = phys_criterion(x_mid, pred)
+                eps_batch = eps_tensor[hb]
+                phys_loss = phys_criterion(x_mid, pred, eps_batch)
                 loss      = mse_loss + lambda_phys * phys_loss
 
                 vl_mse   += mse_loss.item()
@@ -477,7 +502,7 @@ def train_pinn_model(data_dict, save_dir,
 
     test_preds, test_trues = [], []
     with torch.no_grad():
-        for xb, yb in te_loader:
+        for xb, yb, _ in te_loader:
             test_preds.append(model(xb.to(device)).cpu().numpy())
             test_trues.append(yb.cpu().numpy())
 
@@ -502,16 +527,16 @@ def train_pinn_model(data_dict, save_dir,
         'dataset': 'REDD',
         'model': 'PhysicsInformedLiquidNetworkModel',
         'description': 'shared AdvancedLiquidTimeLayer encoder + per-appliance heads + adaptive L_phys',
-        'loss': f'MSE + {lambda_phys} * PhysicsConsistency(ε={epsilon_w:.1f}W, k={epsilon_k})',
+        'loss': f'MSE + {lambda_phys} * PhysicsConsistency(per-hour ε, k={epsilon_k})',
         'window_size': WIN,
-        'adaptive_epsilon': {'mu_plus_k_sigma': epsilon_w, 'k': epsilon_k},
+        'epsilon_schedule': {f'{h:02d}h': float(eps_schedule[h]) for h in range(24)},
         'model_params': {
             'input_size': 1, 'hidden_size': hidden_size,
             'n_appliances': len(APPLIANCES), 'dt': dt,
         },
         'train_params': {
             'lr': LR, 'epochs': EPOCHS, 'patience': PATIENCE,
-            'lambda_phys': lambda_phys, 'epsilon_w': epsilon_w, 'epsilon_k': epsilon_k,
+            'lambda_phys': lambda_phys, 'epsilon_k': epsilon_k, 'epsilon_cap': epsilon_cap,
         },
         'test_metrics': {
             app: {k: float(v) for k, v in m.items()}
