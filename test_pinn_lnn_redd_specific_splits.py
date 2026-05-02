@@ -52,7 +52,7 @@ from utils import calculate_nilm_metrics, save_model
 # Constants
 # ---------------------------------------------------------------------------
 
-EPOCHS        = 80
+EPOCHS        = 120
 PATIENCE      = 30     # extended: need headroom for BCE to fire and improve MW
 LR            = 1e-3
 BATCH         = 32
@@ -70,16 +70,18 @@ BCE_ANNEAL    = 10     # ramp BCE from 0→full weight over this many epochs aft
 APPLIANCES = ['dish washer', 'fridge', 'microwave', 'washer dryer']
 
 THRESHOLDS = {
-    'dish washer':  50.0,   # raised from 10W — DW idles near 0, active draw is 1200W+
-    'fridge':       50.0,   # raised from 10W — fridge compressor draw is 100-200W
-    'microwave':    50.0,   # raised from 10W — microwave is either OFF or 600W+
-    'washer dryer':  0.5,   # keep low — WD standby is already near-zero in REDD
+    'dish washer':  50.0,   # DW idles near 0, active draw is 1200W+
+    'fridge':       50.0,   # fridge compressor draw is 100-200W
+    'microwave':    50.0,   # microwave is either OFF or 600W+
+    'washer dryer': 200.0,  # WD is off or drawing 300-500W+ — 0.5W caused always-ON
 }
 
 # BCE applied to state_head (sigmoid) — separated from regression so it can't
-# distort power magnitude. Reduced weights after dual-head decoupling.
-BCE_LAMBDA = {'dish washer': 0.05, 'fridge': 0.05, 'microwave': 0.15, 'washer dryer': 0.02}
-BCE_ALPHA  = {'dish washer': 1.5,  'fridge': 1.5,  'microwave': 3.0,  'washer dryer': 1.5}
+# distort power magnitude.
+# WD BCE disabled: positive class weight was biasing state_head toward always-ON;
+#                  regression + physics loss alone handles WD detection.
+BCE_LAMBDA = {'dish washer': 0.05, 'fridge': 0.05, 'microwave': 0.20, 'washer dryer': 0.0}
+BCE_ALPHA  = {'dish washer': 1.5,  'fridge': 1.5,  'microwave': 5.0,  'washer dryer': 1.5}
 
 
 # ---------------------------------------------------------------------------
