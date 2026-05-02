@@ -73,14 +73,14 @@ THRESHOLDS = {
     'dish washer':  50.0,   # DW idles near 0, active draw is 1200W+
     'fridge':       50.0,   # fridge compressor draw is 100-200W
     'microwave':    50.0,   # microwave is either OFF or 600W+
-    'washer dryer': 100.0,  # compromise: 0.5W caused always-ON, 200W caused always-OFF
+    'washer dryer': 200.0,  # raised from 100W to break always-on bias
 }
 
 # BCE applied to state_head (sigmoid) — separated from regression so it can't
 # distort power magnitude.
-# WD: light BCE restored so state_head learns bimodal on/off at 100W boundary.
-BCE_LAMBDA = {'dish washer': 0.05, 'fridge': 0.05, 'microwave': 0.20, 'washer dryer': 0.05}
-BCE_ALPHA  = {'dish washer': 1.5,  'fridge': 1.5,  'microwave': 5.0,  'washer dryer': 2.5}
+# WD: heavier BCE (0.15/α=4) to prevent always-on collapse; threshold raised to 200W.
+BCE_LAMBDA = {'dish washer': 0.05, 'fridge': 0.05, 'microwave': 0.40, 'washer dryer': 0.15}
+BCE_ALPHA  = {'dish washer': 1.5,  'fridge': 1.5,  'microwave': 8.0,  'washer dryer': 4.0}
 
 
 # ---------------------------------------------------------------------------
@@ -492,8 +492,10 @@ def train_pinn_model(data_dict, save_dir,
             y_true_all, y_pred_all, y_scalers)
         history['val_metrics'].append(per_app_metrics)
 
-        avg_f1  = np.mean([per_app_metrics[a]['f1']  for a in APPLIANCES])
+        f1s     = [per_app_metrics[a]['f1'] for a in APPLIANCES]
         avg_mae = np.mean([per_app_metrics[a]['mae'] for a in APPLIANCES])
+        # Harmonic mean F1 — prevents a single always-on appliance from inflating the score
+        avg_f1  = len(f1s) / sum(1.0 / (f + 1e-6) for f in f1s)
 
         print(
             f"  Epoch {epoch+1:3d}/{EPOCHS}  "
