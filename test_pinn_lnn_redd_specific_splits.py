@@ -73,15 +73,14 @@ THRESHOLDS = {
     'dish washer':  50.0,   # DW idles near 0, active draw is 1200W+
     'fridge':       50.0,   # fridge compressor draw is 100-200W
     'microwave':    50.0,   # microwave is either OFF or 600W+
-    'washer dryer': 200.0,  # WD is off or drawing 300-500W+ — 0.5W caused always-ON
+    'washer dryer': 100.0,  # compromise: 0.5W caused always-ON, 200W caused always-OFF
 }
 
 # BCE applied to state_head (sigmoid) — separated from regression so it can't
 # distort power magnitude.
-# WD BCE disabled: positive class weight was biasing state_head toward always-ON;
-#                  regression + physics loss alone handles WD detection.
-BCE_LAMBDA = {'dish washer': 0.05, 'fridge': 0.05, 'microwave': 0.20, 'washer dryer': 0.0}
-BCE_ALPHA  = {'dish washer': 1.5,  'fridge': 1.5,  'microwave': 5.0,  'washer dryer': 1.5}
+# WD: light BCE restored so state_head learns bimodal on/off at 100W boundary.
+BCE_LAMBDA = {'dish washer': 0.05, 'fridge': 0.05, 'microwave': 0.20, 'washer dryer': 0.05}
+BCE_ALPHA  = {'dish washer': 1.5,  'fridge': 1.5,  'microwave': 5.0,  'washer dryer': 2.5}
 
 
 # ---------------------------------------------------------------------------
