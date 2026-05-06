@@ -67,22 +67,27 @@ from utils import calculate_nilm_metrics
 # ---------------------------------------------------------------------------
 
 EPOCHS      = 80
-PATIENCE    = 20
+PATIENCE    = 25
 LR          = 1e-3
 BATCH       = 32
 WIN         = 100   # window length; 51 unique FFT bins available
 STRIDE      = 5
 
 # FNO hyperparameters
-N_MODES     = 16    # frequency modes retained (out of WIN//2+1 = 51)
+N_MODES     = 32    # frequency modes retained; increased from 16 for sharper transitions
 FNO_CH      = 16    # channel width inside FNO blocks
 N_FNO       = 3     # number of stacked FNO blocks
 
 # LNN hyperparameters
-HIDDEN_LNN  = 64
+HIDDEN_LNN  = 128   # increased from 64; more capacity for 4 concurrent signatures
 DT          = 0.1
 
 FUSION_SIZE = 64    # hidden size of fusion MLP
+
+# Loss / scaling options
+USE_LOG1P   = True  # log1p-transform targets before MinMax scaling so that
+                    # low-power appliances (MW) get comparable gradient signal
+                    # to high-power ones (WD)
 
 APPLIANCES  = ['dish washer', 'fridge', 'microwave', 'washer dryer']
 THRESHOLDS  = {'dish washer': 10.0, 'fridge': 10.0,
@@ -312,6 +317,9 @@ def compute_per_appliance_metrics(y_true, y_pred, y_scalers):
     for i, app in enumerate(APPLIANCES):
         raw_true = y_scalers[i].inverse_transform(y_true[:, i:i+1]).flatten()
         raw_pred = y_scalers[i].inverse_transform(y_pred[:, i:i+1]).flatten()
+        if USE_LOG1P:
+            raw_true = np.expm1(raw_true.clip(min=0.0))
+            raw_pred = np.expm1(raw_pred.clip(min=0.0))
         metrics[app] = calculate_nilm_metrics(
             raw_true, raw_pred, threshold=THRESHOLDS[app])
     return metrics
@@ -342,6 +350,14 @@ def train_fno_lnn_model(data_dict, save_dir: str,
     X_va = x_scaler.transform(X_va.reshape(-1, 1)).reshape(X_va.shape)
     X_te = x_scaler.transform(X_te.reshape(-1, 1)).reshape(X_te.shape)
 
+    # Optional log1p transform: compresses high-power appliance range so that
+    # low-duty-cycle appliances (MW ~2% on-time) aren't drowned in MSE by
+    # high-power ones (WD at 500W+).  Inverse: expm1 at eval time.
+    if USE_LOG1P:
+        Y_tr = np.log1p(Y_tr)
+        Y_va = np.log1p(Y_va)
+        Y_te = np.log1p(Y_te)
+
     y_scalers = []
     for i in range(len(APPLIANCES)):
         ys = MinMaxScaler()
@@ -349,6 +365,17 @@ def train_fno_lnn_model(data_dict, save_dir: str,
         Y_va[:, i:i+1] = ys.transform(Y_va[:, i:i+1])
         Y_te[:, i:i+1] = ys.transform(Y_te[:, i:i+1])
         y_scalers.append(ys)
+
+    # Weighted MSE: w_i = 1 / mean_scaled_power_i
+    # Appliances with low duty cycle (MW rarely on → low mean) get high weight
+    # so their rare events are not ignored by the gradient.
+    mean_powers   = Y_tr.mean(axis=0).clip(min=1e-6)        # (4,) mean scaled power
+    loss_weights  = 1.0 / mean_powers
+    loss_weights /= loss_weights.mean()                      # normalise: mean weight = 1
+    loss_weights  = torch.tensor(loss_weights, dtype=torch.float32)
+    print("  Loss weights (higher = more emphasis):")
+    for app, w in zip(APPLIANCES, loss_weights.tolist()):
+        print(f"    {app:<14}  mean_scaled={mean_powers[APPLIANCES.index(app)]:.4f}  w={w:.3f}")
 
     print(f"Train: {X_tr.shape} → {Y_tr.shape}")
     print(f"Val:   {X_va.shape} → {Y_va.shape}")
@@ -374,7 +401,7 @@ def train_fno_lnn_model(data_dict, save_dir: str,
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model parameters: {n_params:,}")
 
-    criterion = nn.MSELoss()
+    w = loss_weights.to(device)  # (4,) appliance loss weights
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=8, min_lr=1e-5)
@@ -395,7 +422,7 @@ def train_fno_lnn_model(data_dict, save_dir: str,
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
             pred = model(xb)
-            loss = criterion(pred, yb)
+            loss = ((pred - yb) ** 2 * w).mean()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
@@ -413,7 +440,7 @@ def train_fno_lnn_model(data_dict, save_dir: str,
             for xb, yb in va_loader:
                 xb, yb = xb.to(device), yb.to(device)
                 pred    = model(xb)
-                vl_loss += criterion(pred, yb).item()
+                vl_loss += ((pred - yb) ** 2 * w).mean().item()
                 val_preds.append(pred.cpu().numpy())
                 val_trues.append(yb.cpu().numpy())
 
