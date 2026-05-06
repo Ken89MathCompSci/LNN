@@ -31,7 +31,8 @@
       "Bash(git push *)",
       "Bash(where py *)",
       "Bash(py --version)",
-      "Bash(py -c ' *)"
+      "Bash(py -c ' *)",
+      "Bash(python test_kan_pinn_redd_specific_splits.py)"
     ]
   }
 }
