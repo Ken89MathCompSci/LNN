@@ -90,8 +90,13 @@ USE_LOG1P   = True  # log1p-transform targets before MinMax scaling so that
                     # to high-power ones (WD)
 
 APPLIANCES  = ['dish washer', 'fridge', 'microwave', 'washer dryer']
-THRESHOLDS  = {'dish washer': 10.0, 'fridge': 10.0,
-               'microwave': 10.0, 'washer dryer': 10.0}
+THRESHOLDS  = {
+    'dish washer':  10.0,   # DW: off=0W, active=1000-1500W; 10W catches any draw
+    'fridge':       50.0,   # FR: raised from 10W — compressor draw is 100-200W;
+                            #     10W caused always-ON (model predicts constant ~30W)
+    'microwave':    10.0,   # MW: off=0W, active=600-1000W
+    'washer dryer': 10.0,   # WD: rarely active in test; 10W is fine
+}
 
 
 # ---------------------------------------------------------------------------
@@ -407,9 +412,9 @@ def train_fno_lnn_model(data_dict, save_dir: str,
         optimizer, mode='min', factor=0.5, patience=8, min_lr=1e-5)
 
     history = {'train_loss': [], 'val_loss': [], 'val_metrics': []}
-    best_val_loss = float('inf')
-    best_state    = None
-    counter       = 0
+    best_val_f1 = -float('inf')   # maximise avg val F1 (not val MSE)
+    best_state  = None
+    counter     = 0
 
     print("Starting FNO-LNN training (all appliances simultaneously)...")
 
@@ -468,10 +473,10 @@ def train_fno_lnn_model(data_dict, save_dir: str,
                   f"P={m['precision']:.4f}  R={m['recall']:.4f}  "
                   f"MAE={m['mae']:.2f}  SAE={m['sae']:.4f}")
 
-        if avg_va < best_val_loss:
-            best_val_loss = avg_va
-            best_state    = {k: v.clone() for k, v in model.state_dict().items()}
-            counter       = 0
+        if avg_f1 > best_val_f1:
+            best_val_f1 = avg_f1
+            best_state  = {k: v.clone() for k, v in model.state_dict().items()}
+            counter     = 0
         else:
             counter += 1
             if counter >= PATIENCE:
