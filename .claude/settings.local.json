@@ -32,7 +32,8 @@
       "Bash(where py *)",
       "Bash(py --version)",
       "Bash(py -c ' *)",
-      "Bash(python test_kan_pinn_redd_specific_splits.py)"
+      "Bash(python test_kan_pinn_redd_specific_splits.py)",
+      "Bash(xargs -I{} basename {})"
     ]
   }
 }
