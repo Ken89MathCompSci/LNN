@@ -114,7 +114,8 @@ LR            = 1e-3
 BATCH         = 128
 WIN           = 100
 STRIDE        = 5
-WARMUP_EPOCHS = 15
+WARMUP_EPOCHS  = 15
+BCE_RAMP_EPOCHS = 5   # ramp BCE weight 0→full over this many epochs after warmup
 
 SPEC_RADIUS   = 0.99
 
@@ -136,13 +137,13 @@ BCE_LAMBDA = {
 }
 
 BCE_ALPHA = {
-    'dish washer':  10.0,
+    'dish washer':   2.5,   # was 10.0 — over-aggressive, caused always-ON collapse
     'fridge':        0.5,
     'microwave':     4.0,
     'washer dryer':  3.0,
 }
 
-SAVE_DIR = os.path.join('results', 'gsc_lnn_ukdale')
+SAVE_DIR = os.path.join('results', 'gsc_lnn_ukdale_v2')
 COLOR    = '#1F77B4'   # blue — distinct from G(orange) S(purple) GS(red)
 
 
@@ -338,13 +339,18 @@ def train_appliance(appliance_name, splits, device, epochs, hidden_size):
         mse = F.mse_loss(out, yb)
         if epoch < WARMUP_EPOCHS:
             return mse
+        # Linear ramp: BCE weight grows 0 → bce_lam over BCE_RAMP_EPOCHS epochs.
+        # Removes the discontinuous loss-surface jump at the warmup boundary that
+        # previously drove DW/fridge to always-ON/OFF collapse in the first BCE epoch.
+        ramp      = min(1.0, (epoch - WARMUP_EPOCHS + 1) / BCE_RAMP_EPOCHS)
+        bce_w     = bce_lam * ramp
         prob  = torch.sigmoid(out / (thr_scaled + 1e-8))
         y_bin = (yb > thr_scaled).float()
         w     = torch.where(y_bin == 1,
                             torch.full_like(y_bin, bce_alpha),
                             torch.ones_like(y_bin))
         bce   = F.binary_cross_entropy(prob.clamp(1e-7, 1 - 1e-7), y_bin, weight=w)
-        return mse + bce_lam * bce
+        return mse + bce_w * bce
 
     train_losses, val_losses = [], []
     val_mae_h, val_f1_h, val_p_h, val_r_h = [], [], [], []
@@ -525,7 +531,7 @@ def plot_training_curves(results, save_dir):
         ax.set_title(app.title())
         ax.set_xlabel('Epoch'); ax.set_ylabel('Loss')
         ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
-    fig.suptitle('Training Curves — GSC-LNN (UKDALE)', fontsize=12)
+    fig.suptitle('Training Curves — GSC-LNN v2 (UKDALE)', fontsize=12)
     plt.tight_layout()
     path = os.path.join(save_dir, 'training_curves.png')
     plt.savefig(path, dpi=150, bbox_inches='tight')
@@ -558,7 +564,7 @@ def plot_epoch_metrics(results, save_dir):
             ax.set_title(f'{app.title()} — {label}')
             ax.set_xlabel('Epoch'); ax.set_ylabel(label)
             ax.grid(True, alpha=0.3)
-    fig.suptitle('Val Metrics per Epoch — GSC-LNN (UKDALE)', fontsize=12)
+    fig.suptitle('Val Metrics per Epoch — GSC-LNN v2 (UKDALE)', fontsize=12)
     plt.tight_layout()
     path = os.path.join(save_dir, 'epoch_metrics.png')
     plt.savefig(path, dpi=150, bbox_inches='tight')
@@ -584,7 +590,7 @@ def plot_bar_chart(results, save_dir):
         ax.set_xticklabels(APP_LABELS, rotation=12, ha='right')
         ax.set_ylabel(ml); ax.set_title(ml)
         ax.grid(axis='y', alpha=0.3); ax.set_axisbelow(True)
-    fig.suptitle('Final Test Metrics — GSC-LNN (UKDALE)', fontsize=12)
+    fig.suptitle('Final Test Metrics — GSC-LNN v2 (UKDALE)', fontsize=12)
     plt.tight_layout()
     path = os.path.join(save_dir, 'bar_chart.png')
     plt.savefig(path, dpi=150, bbox_inches='tight')
@@ -597,7 +603,7 @@ def print_table(results):
     for metric, label in [('f1', 'F1'), ('precision', 'Precision'),
                            ('recall', 'Recall'), ('mae', 'MAE'), ('sae', 'SAE')]:
         print(f"\n{'='*70}")
-        print(f"  {label} — GSC-LNN (UKDALE)")
+        print(f"  {label} — GSC-LNN v2 (UKDALE)")
         print(f"{'='*70}")
         print(f"  {'Appliance':<20}{'Value':>12}  (epochs)")
         print(divider)
