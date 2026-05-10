@@ -6,7 +6,13 @@ Extends test_pinn_lnn_ukdale_specific_splits.py with seq-to-seq prediction:
     instead of just the midpoint (batch, n_apps).
   - WIN labels per window instead of 1 → richer training signal.
   - Physics constraint applied across all WIN timesteps simultaneously.
-  - Evaluation uses midpoint predictions for comparability with seq-to-point.
+  - Evaluation reconstructs the FULL time-series by averaging overlapping
+    window predictions (UNet-NILM style), then evaluates over all timesteps.
+
+Overlap averaging:
+    With STRIDE=5 and WIN=100, each timestep is covered by up to 20 windows.
+    We accumulate predictions and divide by coverage count, which smooths
+    out per-window noise without discarding any predictions.
 
 Architecture:
     Input (batch, WIN, 1)  — scaled mains window
@@ -24,7 +30,8 @@ Loss:
     Stage 1 (epochs 1–WARMUP_EPOCHS): MSE only
     Stage 2 (remaining epochs):       MSE + λ·L_phys + weighted BCE
 
-    L_phys is now averaged over all WIN timesteps in each window.
+    Both L_phys and BCE reduce with .mean() over (batch × WIN), so their
+    gradient scale is comparable to the seq-to-point version.
 """
 
 import sys
@@ -73,15 +80,50 @@ BCE_ALPHA  = {'dish washer': 2.0, 'fridge': 2.0, 'microwave': 1.0, 'washer dryer
 
 
 # ---------------------------------------------------------------------------
+# Sequence reconstruction
+# ---------------------------------------------------------------------------
+
+def reconstruct_sequence(window_preds, stride=STRIDE, window_size=WIN):
+    """
+    Reconstruct a full power trace from overlapping window predictions by
+    averaging all predictions that cover each timestep.
+
+    Args:
+        window_preds: (N_windows, WIN, n_apps) ndarray — ordered predictions
+        stride:       int — stride used to create windows
+        window_size:  int — window length (WIN)
+
+    Returns:
+        (T, n_apps) ndarray where T = (N_windows - 1) * stride + window_size
+
+    Note: true labels are constant across overlapping windows (the same
+    timestep has the same true power regardless of which window it appears in),
+    so reconstruct_sequence on y_true returns exact true values everywhere.
+    Predictions benefit from the averaging since each window gives a slightly
+    different estimate — averaging reduces per-window noise.
+    """
+    n_windows, _, n_apps = window_preds.shape
+    data_len = (n_windows - 1) * stride + window_size
+    full = np.zeros((data_len, n_apps), dtype=np.float32)
+    cnt  = np.zeros((data_len, n_apps), dtype=np.float32)
+    for i in range(n_windows):
+        s = i * stride
+        full[s:s + window_size] += window_preds[i]
+        cnt[s:s + window_size]  += 1
+    return full / np.maximum(cnt, 1)
+
+
+# ---------------------------------------------------------------------------
 # Physics Consistency Loss  (seq-to-seq version)
 # ---------------------------------------------------------------------------
 
 class PhysicsConsistencyLoss(nn.Module):
     """
     Soft one-sided penalty over every timestep in the window:
-        mean_t mean_batch( ReLU(Σ_i p_hat_i_raw(t) - P_agg_raw(t) - ε) )
+        mean_{batch,t}( ReLU(Σ_i p_hat_i_raw(t) - P_agg_raw(t) - ε) )
 
-    Inputs are in scaled space; inverse-scaling is done differentiably.
+    .mean() reduces over both batch and WIN dimensions, so the loss scale
+    is comparable to the seq-to-point version (both are per-element averages).
     """
 
     def __init__(self, x_scaler, y_scalers, appliances, epsilon_w=EPSILON_W):
@@ -109,8 +151,8 @@ class PhysicsConsistencyLoss(nn.Module):
         x_raw = x_scaled * self.x_range + self.x_min           # (batch, WIN)
         p_raw = pred_scaled * self.y_ranges + self.y_mins       # (batch, WIN, n_apps)
         p_sum = p_raw.sum(dim=-1)                               # (batch, WIN)
-        violation = F.relu(p_sum - x_raw - self.epsilon)
-        return violation.mean()
+        violation = F.relu(p_sum - x_raw - self.epsilon)        # (batch, WIN)
+        return violation.mean()                                  # mean over batch AND WIN
 
 
 # ---------------------------------------------------------------------------
@@ -172,14 +214,12 @@ class PhysicsInformedLiquidNetworkModel(nn.Module):
 
             h_seq.append(h)
 
-        # Stack along time: (batch, seq_len, hidden)
-        h_seq = torch.stack(h_seq, dim=1)
+        h_seq = torch.stack(h_seq, dim=1)   # (batch, seq_len, hidden)
         h_seq = self.norm(h_seq)
 
-        # Apply each head across all timesteps: (batch, seq_len, 1) → squeeze
-        # Stack appliances on last dim: (batch, seq_len, n_apps)
+        # Apply each head across all timesteps — output (batch, seq_len, n_apps)
         out = torch.cat([head(h_seq) for head in self.heads], dim=-1)
-        return out   # (batch, WIN, n_apps)
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -220,11 +260,10 @@ def load_data():
 
 def create_sequences(data, window_size=WIN):
     """
-    Seq-to-seq version: Y contains appliance labels at EVERY timestep in the
-    window, not just the midpoint.
+    Seq-to-seq: Y contains appliance labels at EVERY timestep in each window.
 
     Returns:
-        X: (N, WIN, 1)       — scaled mains window
+        X: (N, WIN, 1)       — mains window
         Y: (N, WIN, n_apps)  — appliance power at every timestep
     """
     mains    = data['main'].values
@@ -232,11 +271,10 @@ def create_sequences(data, window_size=WIN):
     X, Y = [], []
     for i in range(0, len(mains) - window_size, STRIDE):
         X.append(mains[i:i + window_size])
-        # All timesteps × all appliances for this window
         window_labels = np.stack(
             [app_vals[app][i:i + window_size] for app in APPLIANCES],
             axis=-1,
-        )  # (WIN, n_apps)
+        )   # (WIN, n_apps)
         Y.append(window_labels)
     return (
         np.array(X, dtype=np.float32).reshape(-1, window_size, 1),
@@ -245,28 +283,26 @@ def create_sequences(data, window_size=WIN):
 
 
 # ---------------------------------------------------------------------------
-# Per-appliance metrics helper
-# (uses midpoint prediction from each window for comparability)
+# Metrics on reconstructed full sequences
 # ---------------------------------------------------------------------------
 
-def compute_per_appliance_metrics(y_true, y_pred, y_scalers):
+def compute_per_appliance_metrics(y_true_recon, y_pred_recon, y_scalers):
     """
+    Evaluate on the full reconstructed time-series (after overlap averaging).
+
     Args:
-        y_true, y_pred: (N, WIN, n_apps) — scaled, full sequences
+        y_true_recon: (T, n_apps) — reconstructed true sequence (scaled)
+        y_pred_recon: (T, n_apps) — reconstructed predicted sequence (scaled)
         y_scalers: list of MinMaxScaler, one per appliance
     Returns:
         dict {appliance_name: metrics_dict}
-
-    Extracts the midpoint prediction (WIN//2) from each window so that metrics
-    match the seq-to-point baseline (one prediction per stride step).
     """
-    mid = WIN // 2
     metrics = {}
     for i, app in enumerate(APPLIANCES):
         raw_true = y_scalers[i].inverse_transform(
-            y_true[:, mid, i:i+1]).flatten()
+            y_true_recon[:, i:i+1]).flatten()
         raw_pred = y_scalers[i].inverse_transform(
-            y_pred[:, mid, i:i+1]).flatten()
+            y_pred_recon[:, i:i+1]).flatten()
         metrics[app] = calculate_nilm_metrics(
             raw_true, raw_pred, threshold=THRESHOLDS[app])
     return metrics
@@ -294,7 +330,7 @@ def train_pinn_model(data_dict, save_dir,
     X_va = x_scaler.transform(X_va.reshape(-1, 1)).reshape(X_va.shape)
     X_te = x_scaler.transform(X_te.reshape(-1, 1)).reshape(X_te.shape)
 
-    # Y is now (N, WIN, n_apps) — fit each appliance scaler on all N*WIN values
+    # Y is (N, WIN, n_apps) — fit scaler on all N*WIN values per appliance
     y_scalers = []
     for i in range(len(APPLIANCES)):
         ys = MinMaxScaler()
@@ -363,12 +399,9 @@ def train_pinn_model(data_dict, save_dir,
             # xb: (batch, WIN, 1),  yb: (batch, WIN, n_apps)
             optimizer.zero_grad()
 
-            pred = model(xb)          # (batch, WIN, n_apps)
-
-            mse_loss = mse_criterion(pred, yb)
-
-            # Physics: use the full mains sequence (not just midpoint)
-            x_all    = xb[:, :, 0]   # (batch, WIN)
+            pred = model(xb)           # (batch, WIN, n_apps)
+            mse_loss  = mse_criterion(pred, yb)
+            x_all     = xb[:, :, 0]   # (batch, WIN)
             phys_loss = phys_criterion(x_all, pred)
 
             if epoch < WARMUP_EPOCHS:
@@ -377,7 +410,7 @@ def train_pinn_model(data_dict, save_dir,
                 bce_loss = torch.tensor(0.0, device=device)
                 for i, app in enumerate(APPLIANCES):
                     if BCE_LAMBDA[app] > 0:
-                        # pred[:, :, i]: (batch, WIN) — clamp for numerical stability
+                        # (batch, WIN) — BCE reduces mean over both dims by default
                         pred_i = pred[:, :, i].clamp(1e-7, 1 - 1e-7)
                         thr_s  = thresholds_scaled[i]
                         y_bin  = (yb[:, :, i] > thr_s).float()
@@ -437,11 +470,15 @@ def train_pinn_model(data_dict, save_dir,
 
         scheduler.step(avg_va_mse)
 
-        y_pred_all = np.concatenate(val_preds)   # (N, WIN, n_apps)
+        # Reconstruct full val sequence by averaging overlapping predictions
+        y_pred_all = np.concatenate(val_preds)   # (N_val, WIN, n_apps)
         y_true_all = np.concatenate(val_trues)
 
+        y_pred_recon = reconstruct_sequence(y_pred_all)   # (T_val, n_apps)
+        y_true_recon = reconstruct_sequence(y_true_all)   # (T_val, n_apps)
+
         per_app_metrics = compute_per_appliance_metrics(
-            y_true_all, y_pred_all, y_scalers)
+            y_true_recon, y_pred_recon, y_scalers)
         history['val_metrics'].append(per_app_metrics)
 
         avg_f1  = np.mean([per_app_metrics[a]['f1']  for a in APPLIANCES])
@@ -483,10 +520,14 @@ def train_pinn_model(data_dict, save_dir,
             test_preds.append(model(xb.to(device)).cpu().numpy())
             test_trues.append(yb.cpu().numpy())
 
-    y_pred_te = np.concatenate(test_preds)   # (N, WIN, n_apps)
+    # Reconstruct full test sequence
+    y_pred_te = np.concatenate(test_preds)   # (N_test, WIN, n_apps)
     y_true_te = np.concatenate(test_trues)
 
-    test_metrics = compute_per_appliance_metrics(y_true_te, y_pred_te, y_scalers)
+    y_pred_recon = reconstruct_sequence(y_pred_te)   # (T_test, n_apps)
+    y_true_recon = reconstruct_sequence(y_true_te)
+
+    test_metrics = compute_per_appliance_metrics(y_true_recon, y_pred_recon, y_scalers)
 
     print(f"\n{'Appliance':<15} {'F1':>8} {'Precision':>10} {'Recall':>8} "
           f"{'MAE':>8} {'SAE':>8}")
@@ -501,10 +542,13 @@ def train_pinn_model(data_dict, save_dir,
     config = {
         'dataset': 'UKDALE',
         'model': 'PhysicsInformedLiquidNetworkModel_Seq2Seq',
-        'description': 'seq-to-seq: predicts power at every timestep; '
-                       'evaluation uses midpoint prediction per window',
+        'description': (
+            'seq-to-seq: predicts power at every timestep; '
+            'evaluation reconstructs full trace via overlap averaging'
+        ),
         'loss': f'MSE + {lambda_phys} * PhysicsConsistency(ε={epsilon_w}W, all timesteps)',
         'window_size': WIN,
+        'stride': STRIDE,
         'model_params': {
             'input_size': 1, 'hidden_size': hidden_size,
             'n_appliances': len(APPLIANCES), 'dt': dt,
