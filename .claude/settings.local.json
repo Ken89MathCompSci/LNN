@@ -35,7 +35,10 @@
       "Bash(python test_kan_pinn_redd_specific_splits.py)",
       "Bash(xargs -I{} basename {})",
       "Bash(python test_pinn_lnn_log_ukdale_v4_specific_splits.py)",
-      "Bash(python3 test_pinn_lnn_log_ukdale_v4_specific_splits.py)"
+      "Bash(python3 test_pinn_lnn_log_ukdale_v4_specific_splits.py)",
+      "Bash(python -)",
+      "PowerShell(py --version)",
+      "PowerShell(py -c \"import sys; print\\(sys.executable\\)\")"
     ]
   }
 }
