@@ -1,38 +1,13 @@
 """
-Physics-Informed LNN with Appliance-Specific Temporal Kernels (PINN-LNN-ATK)
-UKDALE specific splits.
+Physics-Informed LNN (PINN-LNN) for NILM — UKDALE specific splits.
+Extends test_pinn_lnn_ukdale_specific_splits.py with TP, TN, FP, FN reporting.
 
-Extends test_pinn_lnn_ukdale_specific_splits.py by replacing the shared-only
-encoder with a two-path architecture that gives each appliance its own
-temporal convolution kernel sized to its real-world dynamics:
-
-    Appliance       Kernel  Rationale
-    ------------    ------  -----------------------------------------
-    Microwave          3    Sub-minute sparse spikes (~18 s)
-    Fridge            11    ~90 s compressor period (~66 s)
-    Dish washer       21    Heating-element switching cycles (~126 s)
-    Washer dryer      31    Multi-stage wash transitions (~186 s)
-
-Architecture:
-    Input (batch, WIN, 1)
-         ├── Shared AdvancedLiquidTimeLayer → h: (batch, hidden=64)
-         │
-         └── Per-appliance 1-D temporal conv branch:
-               Conv1d(1, CONV_CH, kernel_k) → ReLU → AdaptiveAvgPool1d(1)
-               → c_i: (batch, CONV_CH=16)
-
-    Per appliance i:
-         cat(h, c_i): (batch, hidden + CONV_CH)
-              ↓
-         Linear(hidden + CONV_CH, 1) → scalar prediction
-
-    The shared LNN provides global context (which large loads are active);
-    the per-appliance conv captures the characteristic local temporal signature
-    of each appliance without cross-appliance interference.
-
-Loss (unchanged from base):
-    Stage 1 (warmup): MSE only
-    Stage 2:          MSE + λ·L_phys + weighted BCE
+Identical architecture and training to the base script. The only additions are:
+  - set_seed(42) for reproducibility
+  - compute_per_appliance_metrics returns tp/tn/fp/fn alongside existing metrics
+  - Per-epoch val prints include tp/tn/fp/fn
+  - Final test table shows tp/tn/fp/fn
+  - JSON output includes tp/tn/fp/fn
 """
 
 import sys
@@ -75,9 +50,9 @@ BATCH       = 32
 WIN         = 100
 STRIDE      = 5
 
-LAMBDA_PHYS   = 0.01   # physics loss weight — kept small so MSE dominates
-EPSILON_W     = 50.0   # tolerance for background / unlabelled loads (Watts)
-WARMUP_EPOCHS = 20     # Stage 1: MSE-only; physics + BCE added after this epoch
+LAMBDA_PHYS   = 0.01
+EPSILON_W     = 50.0
+WARMUP_EPOCHS = 20
 
 APPLIANCES = ['dish washer', 'fridge', 'microwave', 'washer dryer']
 
@@ -88,21 +63,8 @@ THRESHOLDS = {
     'washer dryer':  0.5,
 }
 
-# Per-appliance weighted BCE for class-imbalanced appliances
-# BCE_LAMBDA: weight of the BCE term in the total loss (0 = disabled)
-# BCE_ALPHA:  positive-class weight multiplier (α > 1 upweights ON samples)
 BCE_LAMBDA = {'dish washer': 0.5, 'fridge': 0.3, 'microwave': 0.0, 'washer dryer': 0.0}
 BCE_ALPHA  = {'dish washer': 2.0, 'fridge': 2.0, 'microwave': 1.0, 'washer dryer': 1.0}
-
-# Appliance-specific temporal conv kernel sizes (odd, in timesteps at 6 s/step)
-# Sized to the characteristic ON-event duration of each appliance
-TEMPORAL_KERNELS = {
-    'dish washer':  21,   # ~126 s — heating-element switching bursts
-    'fridge':       11,   # ~66 s  — compressor on/off period
-    'microwave':     3,   # ~18 s  — sub-minute sparse spikes
-    'washer dryer': 31,   # ~186 s — multi-stage wash transitions
-}
-CONV_CHANNELS = 16        # feature maps per appliance conv branch
 
 
 # ---------------------------------------------------------------------------
@@ -110,82 +72,39 @@ CONV_CHANNELS = 16        # feature maps per appliance conv branch
 # ---------------------------------------------------------------------------
 
 class PhysicsConsistencyLoss(nn.Module):
-    """
-    Soft one-sided penalty:  ReLU(Σ p_hat_i_raw - P_agg_raw - ε)
-
-    All arithmetic is in raw Watts via differentiable linear inverse-scaling.
-    MinMaxScaler inverse: x_raw = x_scaled * data_range_ + data_min_
-    """
-
     def __init__(self, x_scaler, y_scalers, appliances, epsilon_w=EPSILON_W):
         super().__init__()
         self.epsilon = epsilon_w
 
-        # Mains scaler params (fit on flattened X_train)
         x_min   = float(x_scaler.data_min_[0])
         x_range = float(x_scaler.data_range_[0])
         self.register_buffer('x_min',   torch.tensor(x_min,   dtype=torch.float32))
         self.register_buffer('x_range', torch.tensor(x_range, dtype=torch.float32))
 
-        # Per-appliance scaler params — stored as (n_apps,) vectors
         y_mins   = [float(y_scalers[i].data_min_[0])   for i in range(len(appliances))]
         y_ranges = [float(y_scalers[i].data_range_[0]) for i in range(len(appliances))]
         self.register_buffer('y_mins',   torch.tensor(y_mins,   dtype=torch.float32))
         self.register_buffer('y_ranges', torch.tensor(y_ranges, dtype=torch.float32))
 
     def forward(self, x_mid_scaled, pred_scaled):
-        """
-        Args:
-            x_mid_scaled: (batch,)        — scaled mains value at window midpoint
-            pred_scaled:  (batch, n_apps) — scaled appliance predictions
-        Returns:
-            scalar loss
-        """
-        # Inverse-scale to raw Watts (differentiable — linear ops only)
-        x_raw = x_mid_scaled * self.x_range + self.x_min          # (batch,)
-        p_raw = pred_scaled  * self.y_ranges + self.y_mins         # (batch, n_apps)
-
-        p_sum     = p_raw.sum(dim=1)                               # (batch,)
-        violation = F.relu(p_sum - x_raw - self.epsilon)           # (batch,)
+        x_raw = x_mid_scaled * self.x_range + self.x_min
+        p_raw = pred_scaled  * self.y_ranges + self.y_mins
+        p_sum     = p_raw.sum(dim=1)
+        violation = F.relu(p_sum - x_raw - self.epsilon)
         return violation.mean()
 
 
 # ---------------------------------------------------------------------------
-# PINN-LNN with Appliance-Specific Temporal Kernels
+# Physics-Informed LNN Model
 # ---------------------------------------------------------------------------
 
 class PhysicsInformedLiquidNetworkModel(nn.Module):
-    """
-    Two-path architecture per appliance:
-
-    Path A — Shared AdvancedLiquidTimeLayer
-        Processes the full WIN-length mains sequence.
-        Captures global context: which large loads are active, aggregate level.
-        Output: h (batch, hidden_size)
-
-    Path B — Per-appliance 1-D temporal convolution
-        Each appliance gets its own Conv1d with a kernel sized to its
-        characteristic event duration (see TEMPORAL_KERNELS).
-        AdaptiveAvgPool1d(1) collapses the time axis after convolution,
-        giving a fixed-size feature regardless of WIN.
-        Output: c_i (batch, CONV_CHANNELS)
-
-    Head i:  Linear(hidden_size + CONV_CHANNELS, 1)
-        Applied to cat(h, c_i) — sees both global and appliance-local features.
-    """
-
-    def __init__(self, input_size, hidden_size, n_appliances, dt=0.1,
-                 appliances=None, conv_channels=CONV_CHANNELS):
+    def __init__(self, input_size, hidden_size, n_appliances, dt=0.1):
         super().__init__()
         self.hidden_size  = hidden_size
         self.n_appliances = n_appliances
         self.dt           = dt
-        self.conv_channels = conv_channels
 
-        if appliances is None:
-            appliances = APPLIANCES
-
-        # ── Path A: Shared AdvancedLiquidTimeLayer ──
         self.input_proj  = nn.Linear(input_size, hidden_size)
         self.tau_base    = nn.Parameter(torch.ones(hidden_size))
         self.tau_mod     = nn.Linear(input_size, hidden_size)
@@ -194,35 +113,14 @@ class PhysicsInformedLiquidNetworkModel(nn.Module):
         self.gate        = nn.Linear(input_size + hidden_size, hidden_size)
         self.norm        = nn.LayerNorm(hidden_size)
 
-        # ── Path B: Per-appliance temporal conv branches ──
-        # Input to Conv1d: (batch, 1, WIN) — channels-first
-        self.app_convs = nn.ModuleList()
-        for app in appliances:
-            k = TEMPORAL_KERNELS[app]
-            self.app_convs.append(nn.Sequential(
-                nn.Conv1d(input_size, conv_channels, kernel_size=k,
-                          padding=k // 2),   # same-length output
-                nn.ReLU(),
-                nn.AdaptiveAvgPool1d(1),     # (batch, conv_channels, 1)
-            ))
-
-        # ── Per-appliance heads: concat(h, c_i) → scalar ──
-        head_in = hidden_size + conv_channels
         self.heads = nn.ModuleList([
-            nn.Linear(head_in, 1) for _ in range(n_appliances)
+            nn.Linear(hidden_size, 1) for _ in range(n_appliances)
         ])
 
     def forward(self, x):
-        """
-        Args:
-            x: (batch, seq_len, input_size)
-        Returns:
-            out: (batch, n_appliances)
-        """
         batch_size, seq_len, _ = x.size()
-
-        # ── Path A: run shared LNN over full sequence ──
         h = torch.zeros(batch_size, self.hidden_size, device=x.device)
+
         for t in range(seq_len):
             x_t = x[:, t, :]
 
@@ -239,23 +137,8 @@ class PhysicsInformedLiquidNetworkModel(nn.Module):
             dh  = ((-h / tau) + gate * f_t) * self.dt
             h   = (h + dh).clamp(-10.0, 10.0)
 
-        h = self.norm(h)   # (batch, hidden_size)
-
-        # ── Path B: per-appliance temporal convolution ──
-        # Conv1d expects (batch, channels, length) — transpose seq and channel dims
-        x_conv = x.permute(0, 2, 1)   # (batch, input_size, seq_len)
-        conv_feats = [
-            conv(x_conv).squeeze(-1)   # (batch, conv_channels)
-            for conv in self.app_convs
-        ]
-
-        # ── Fuse and predict ──
-        out = torch.cat([
-            head(torch.cat([h, c_i], dim=1))
-            for head, c_i in zip(self.heads, conv_feats)
-        ], dim=1)   # (batch, n_appliances)
-
-        return out
+        h = self.norm(h)
+        return torch.cat([head(h) for head in self.heads], dim=1)
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +178,6 @@ def load_data():
 
 
 def create_sequences(data, window_size=WIN):
-    """Midpoint targeting — y[i] is the appliance values at the window centre."""
     mains    = data['main'].values
     app_vals = {app: data[app].values for app in APPLIANCES}
     X, Y = [], []
@@ -305,12 +187,12 @@ def create_sequences(data, window_size=WIN):
         Y.append([app_vals[app][mid] for app in APPLIANCES])
     return (
         np.array(X, dtype=np.float32).reshape(-1, window_size, 1),
-        np.array(Y, dtype=np.float32),   # (N, n_appliances)
+        np.array(Y, dtype=np.float32),
     )
 
 
 # ---------------------------------------------------------------------------
-# Per-appliance metrics helper
+# Per-appliance metrics helper — includes TP, TN, FP, FN
 # ---------------------------------------------------------------------------
 
 def compute_per_appliance_metrics(y_true, y_pred, y_scalers):
@@ -319,7 +201,7 @@ def compute_per_appliance_metrics(y_true, y_pred, y_scalers):
         y_true, y_pred: (N, n_appliances) — scaled
         y_scalers: list of MinMaxScaler, one per appliance
     Returns:
-        dict {appliance_name: metrics_dict}
+        dict {appliance_name: metrics_dict}  — includes tp, tn, fp, fn
     """
     metrics = {}
     for i, app in enumerate(APPLIANCES):
@@ -327,9 +209,36 @@ def compute_per_appliance_metrics(y_true, y_pred, y_scalers):
             y_true[:, i:i+1]).flatten()
         raw_pred = y_scalers[i].inverse_transform(
             y_pred[:, i:i+1]).flatten()
-        metrics[app] = calculate_nilm_metrics(
-            raw_true, raw_pred, threshold=THRESHOLDS[app])
+
+        m = calculate_nilm_metrics(raw_true, raw_pred, threshold=THRESHOLDS[app])
+
+        thr = THRESHOLDS[app]
+        y_true_bin = raw_true > thr
+        y_pred_bin = raw_pred > thr
+        m['tp'] = int(np.sum( y_true_bin &  y_pred_bin))
+        m['tn'] = int(np.sum(~y_true_bin & ~y_pred_bin))
+        m['fp'] = int(np.sum(~y_true_bin &  y_pred_bin))
+        m['fn'] = int(np.sum( y_true_bin & ~y_pred_bin))
+
+        metrics[app] = m
     return metrics
+
+
+def _print_cm_table(metrics, header="Test Results"):
+    """Print a confusion-matrix table for all appliances."""
+    print(f"\n{'='*80}")
+    print(f"  {header}")
+    print(f"{'='*80}")
+    print(f"  {'Appliance':<16} {'TP':>8} {'TN':>8} {'FP':>8} {'FN':>8} "
+          f"{'F1':>7} {'Prec':>7} {'Rec':>7} {'MAE':>7}")
+    print(f"  {'-'*76}")
+    for app in APPLIANCES:
+        m = metrics[app]
+        print(f"  {app:<16} {m['tp']:>8,} {m['tn']:>8,} {m['fp']:>8,} {m['fn']:>8,} "
+              f"{m['f1']:>7.4f} {m['precision']:>7.4f} {m['recall']:>7.4f} {m['mae']:>7.2f}")
+    avg_f1 = np.mean([metrics[a]['f1'] for a in APPLIANCES])
+    print(f"  {'-'*76}")
+    print(f"  {'Average F1':<16} {'':>8} {'':>8} {'':>8} {'':>8} {avg_f1:>7.4f}")
 
 
 # ---------------------------------------------------------------------------
@@ -342,14 +251,12 @@ def train_pinn_model(data_dict, save_dir,
     os.makedirs(save_dir, exist_ok=True)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
-    print(f"λ_phys={lambda_phys}  ε={epsilon_w} W  hidden={hidden_size}  dt={dt}")
+    print(f"lambda_phys={lambda_phys}  epsilon={epsilon_w} W  hidden={hidden_size}  dt={dt}")
 
-    # ── Sequences (all appliances together) ──
     X_tr, Y_tr = create_sequences(data_dict['train'], WIN)
     X_va, Y_va = create_sequences(data_dict['val'],   WIN)
     X_te, Y_te = create_sequences(data_dict['test'],  WIN)
 
-    # ── Scaling ──
     x_scaler = MinMaxScaler()
     X_tr = x_scaler.fit_transform(X_tr.reshape(-1, 1)).reshape(X_tr.shape)
     X_va = x_scaler.transform(X_va.reshape(-1, 1)).reshape(X_va.shape)
@@ -363,16 +270,15 @@ def train_pinn_model(data_dict, save_dir,
         Y_te[:, i:i+1] = ys.transform(Y_te[:, i:i+1])
         y_scalers.append(ys)
 
-    # Scaled ON/OFF thresholds for BCE (linear inverse of MinMaxScaler)
     thresholds_scaled = [
         (THRESHOLDS[app] - float(y_scalers[i].data_min_[0]))
         / float(y_scalers[i].data_range_[0])
         for i, app in enumerate(APPLIANCES)
     ]
 
-    print(f"Train: {X_tr.shape} → {Y_tr.shape}")
-    print(f"Val:   {X_va.shape} → {Y_va.shape}")
-    print(f"Test:  {X_te.shape} → {Y_te.shape}")
+    print(f"Train: {X_tr.shape} -> {Y_tr.shape}")
+    print(f"Val:   {X_va.shape} -> {Y_va.shape}")
+    print(f"Test:  {X_te.shape} -> {Y_te.shape}")
 
     tr_loader = torch.utils.data.DataLoader(
         MultiApplianceDataset(X_tr, Y_tr), batch_size=BATCH, shuffle=True,  drop_last=False)
@@ -381,14 +287,12 @@ def train_pinn_model(data_dict, save_dir,
     te_loader = torch.utils.data.DataLoader(
         MultiApplianceDataset(X_te, Y_te), batch_size=BATCH, shuffle=False, drop_last=False)
 
-    # ── Model + losses ──
     model = PhysicsInformedLiquidNetworkModel(
         input_size=1, hidden_size=hidden_size,
         n_appliances=len(APPLIANCES), dt=dt,
-        appliances=APPLIANCES, conv_channels=CONV_CHANNELS,
     ).to(device)
 
-    mse_criterion = nn.MSELoss()
+    mse_criterion  = nn.MSELoss()
     phys_criterion = PhysicsConsistencyLoss(
         x_scaler, y_scalers, APPLIANCES, epsilon_w=epsilon_w
     ).to(device)
@@ -408,28 +312,22 @@ def train_pinn_model(data_dict, save_dir,
 
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model parameters: {n_params:,}")
-    print("Starting PINN-LNN training (all appliances simultaneously)...")
+    print("Starting PINN-LNN-CM training...")
 
     for epoch in range(EPOCHS):
         # ── Training ──
         model.train()
         ep_mse = ep_phys = ep_total = 0.0
-        progress_bar = tqdm(tr_loader,
-                            desc=f"Epoch {epoch+1}/{EPOCHS}", leave=False)
+        progress_bar = tqdm(tr_loader, desc=f"Epoch {epoch+1}/{EPOCHS}", leave=False)
         for xb, yb in progress_bar:
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
 
-            pred = model(xb)                          # (batch, n_apps)
-
-            mse_loss = mse_criterion(pred, yb)
-
-            # Midpoint of the input window → aggregate reference in scaled space
-            x_mid = xb[:, WIN // 2, 0]               # (batch,)
+            pred = model(xb)
+            mse_loss  = mse_criterion(pred, yb)
+            x_mid     = xb[:, WIN // 2, 0]
             phys_loss = phys_criterion(x_mid, pred)
 
-            # Stage 1 (warmup): MSE only — let regression converge first
-            # Stage 2: add physics + per-appliance BCE
             if epoch < WARMUP_EPOCHS:
                 loss = mse_loss
             else:
@@ -445,6 +343,7 @@ def train_pinn_model(data_dict, save_dir,
                         bce_loss = bce_loss + BCE_LAMBDA[app] * F.binary_cross_entropy(
                             pred_i, y_bin, weight=w)
                 loss = mse_loss + lambda_phys * phys_loss + bce_loss
+
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
@@ -472,8 +371,7 @@ def train_pinn_model(data_dict, save_dir,
         with torch.no_grad():
             for xb, yb in va_loader:
                 xb, yb = xb.to(device), yb.to(device)
-                pred = model(xb)
-
+                pred      = model(xb)
                 mse_loss  = mse_criterion(pred, yb)
                 x_mid     = xb[:, WIN // 2, 0]
                 phys_loss = phys_criterion(x_mid, pred)
@@ -492,10 +390,9 @@ def train_pinn_model(data_dict, save_dir,
         history['val_phys'].append(avg_va_phys)
         history['val_loss'].append(avg_va_total)
 
-        # Step scheduler on MSE only — total loss oscillates due to physics term
         scheduler.step(avg_va_mse)
 
-        y_pred_all = np.concatenate(val_preds)   # (N, n_apps)
+        y_pred_all = np.concatenate(val_preds)
         y_true_all = np.concatenate(val_trues)
 
         per_app_metrics = compute_per_appliance_metrics(
@@ -516,10 +413,9 @@ def train_pinn_model(data_dict, save_dir,
             m = per_app_metrics[app]
             print(f"    {app:<14}  F1={m['f1']:.4f}  "
                   f"P={m['precision']:.4f}  R={m['recall']:.4f}  "
-                  f"MAE={m['mae']:.2f}  SAE={m['sae']:.4f}")
+                  f"MAE={m['mae']:.2f}  "
+                  f"TP={m['tp']:,}  TN={m['tn']:,}  FP={m['fp']:,}  FN={m['fn']:,}")
 
-        # Early stop on val MSE — prevents physics oscillations from triggering
-        # early stopping before regression has converged
         if avg_va_mse < best_val_loss:
             best_val_loss = avg_va_mse
             best_state    = {k: v.clone() for k, v in model.state_dict().items()}
@@ -548,13 +444,7 @@ def train_pinn_model(data_dict, save_dir,
 
     test_metrics = compute_per_appliance_metrics(y_true_te, y_pred_te, y_scalers)
 
-    print(f"\n{'Appliance':<15} {'F1':>8} {'Precision':>10} {'Recall':>8} "
-          f"{'MAE':>8} {'SAE':>8}")
-    print("-" * 65)
-    for app in APPLIANCES:
-        m = test_metrics[app]
-        print(f"{app:<15} {m['f1']:>8.4f} {m['precision']:>10.4f} "
-              f"{m['recall']:>8.4f} {m['mae']:>8.2f} {m['sae']:>8.4f}")
+    _print_cm_table(test_metrics, header="Test Set — Confusion Matrix + Metrics")
 
     # ── Plots ──
     _plot_training(history, test_metrics, save_dir)
@@ -562,18 +452,9 @@ def train_pinn_model(data_dict, save_dir,
     # ── Save JSON ──
     config = {
         'dataset': 'UKDALE',
-        'model': 'PhysicsInformedLiquidNetworkModel_ATK',
-        'description': (
-            'shared LNN encoder + per-appliance temporal conv kernels '
-            f'(DW={TEMPORAL_KERNELS["dish washer"]}, '
-            f'FR={TEMPORAL_KERNELS["fridge"]}, '
-            f'MW={TEMPORAL_KERNELS["microwave"]}, '
-            f'WD={TEMPORAL_KERNELS["washer dryer"]} timesteps) '
-            f'+ L_phys'
-        ),
-        'loss': f'MSE + {lambda_phys} * PhysicsConsistency(ε={epsilon_w}W)',
-        'temporal_kernels': TEMPORAL_KERNELS,
-        'conv_channels': CONV_CHANNELS,
+        'model': 'PhysicsInformedLiquidNetworkModel_CM',
+        'description': 'shared LNN encoder + per-appliance heads + L_phys + TP/TN/FP/FN reporting',
+        'loss': f'MSE + {lambda_phys} * PhysicsConsistency(epsilon={epsilon_w}W)',
         'window_size': WIN,
         'model_params': {
             'input_size': 1, 'hidden_size': hidden_size,
@@ -584,11 +465,12 @@ def train_pinn_model(data_dict, save_dir,
             'lambda_phys': lambda_phys, 'epsilon_w': epsilon_w,
         },
         'test_metrics': {
-            app: {k: float(v) for k, v in m.items()}
+            app: {k: float(v) if not isinstance(v, int) else v
+                  for k, v in m.items()}
             for app, m in test_metrics.items()
         },
     }
-    with open(os.path.join(save_dir, 'pinn_lnn_atk_ukdale_results.json'),
+    with open(os.path.join(save_dir, 'pinn_lnn_cm_ukdale_results.json'),
               'w', encoding='utf-8') as f:
         json.dump(config, f, indent=4)
 
@@ -602,13 +484,12 @@ def train_pinn_model(data_dict, save_dir,
 def _plot_training(history, test_metrics, save_dir):
     epochs_x = range(1, len(history['train_loss']) + 1)
 
-    # ── Loss curves ──
     plt.figure(figsize=(15, 4))
 
     plt.subplot(1, 3, 1)
     plt.plot(epochs_x, history['train_loss'], label='Train total', color='blue')
     plt.plot(epochs_x, history['val_loss'],   label='Val total',   color='red')
-    plt.title('Total Loss (MSE + λ·Phys)')
+    plt.title('Total Loss (MSE + lambda*Phys)')
     plt.xlabel('Epoch'); plt.ylabel('Loss')
     plt.legend(); plt.grid(True, alpha=0.3)
 
@@ -627,14 +508,13 @@ def _plot_training(history, test_metrics, save_dir):
     plt.legend(); plt.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, 'pinn_lnn_atk_ukdale_loss.png'),
+    plt.savefig(os.path.join(save_dir, 'pinn_lnn_cm_ukdale_loss.png'),
                 dpi=150, bbox_inches='tight')
     plt.close()
 
-    # ── Per-appliance F1 / MAE curves ──
     fig, axes = plt.subplots(len(APPLIANCES), 2,
                              figsize=(12, 4 * len(APPLIANCES)))
-    fig.suptitle('PINN-LNN UKDALE — Per-Appliance Val Metrics', fontsize=13)
+    fig.suptitle('PINN-LNN-CM UKDALE — Per-Appliance Val Metrics', fontsize=13)
 
     for row, app in enumerate(APPLIANCES):
         f1_series  = [m[app]['f1']  for m in history['val_metrics']]
@@ -658,7 +538,7 @@ def _plot_training(history, test_metrics, save_dir):
         ax_mae.legend(); ax_mae.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, 'pinn_lnn_atk_ukdale_per_appliance.png'),
+    plt.savefig(os.path.join(save_dir, 'pinn_lnn_cm_ukdale_per_appliance.png'),
                 dpi=150, bbox_inches='tight')
     plt.close()
 
@@ -674,18 +554,18 @@ if __name__ == "__main__":
             print(f"Error: {f} not found!")
             sys.exit(1)
 
-    timestamp    = datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_dir     = f"models/pinn_lnn_atk_ukdale_{timestamp}"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_dir  = f"models/pinn_lnn_cm_ukdale_{timestamp}"
 
     data_dict = load_data()
 
     test_metrics, history = train_pinn_model(
         data_dict,
-        save_dir     = save_dir,
-        hidden_size  = 64,
-        dt           = 0.1,
-        lambda_phys  = LAMBDA_PHYS,
-        epsilon_w    = EPSILON_W,
+        save_dir    = save_dir,
+        hidden_size = 64,
+        dt          = 0.1,
+        lambda_phys = LAMBDA_PHYS,
+        epsilon_w   = EPSILON_W,
     )
 
     print(f"\nResults saved to {save_dir}")

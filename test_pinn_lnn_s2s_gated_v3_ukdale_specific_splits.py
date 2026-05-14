@@ -22,6 +22,7 @@ Builds on v1 (same architecture and BCE settings) and adds:
 
 import sys
 import os
+import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -35,6 +36,17 @@ from sklearn.preprocessing import MinMaxScaler
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'Source Code'))
 from utils import calculate_nilm_metrics, save_model
+
+
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+set_seed(42)
 
 
 # ---------------------------------------------------------------------------
