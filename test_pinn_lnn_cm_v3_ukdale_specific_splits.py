@@ -226,19 +226,20 @@ def compute_per_appliance_metrics(y_true, y_pred, y_scalers):
 
 
 def _print_cm_table(metrics, header="Test Results"):
-    print(f"\n{'='*80}")
+    print(f"\n{'='*88}")
     print(f"  {header}")
-    print(f"{'='*80}")
+    print(f"{'='*88}")
     print(f"  {'Appliance':<16} {'TP':>8} {'TN':>8} {'FP':>8} {'FN':>8} "
-          f"{'F1':>7} {'Prec':>7} {'Rec':>7} {'MAE':>7}")
-    print(f"  {'-'*76}")
+          f"{'F1':>7} {'Prec':>7} {'Rec':>7} {'MAE':>7} {'SAE':>7}")
+    print(f"  {'-'*84}")
     for app in APPLIANCES:
         m = metrics[app]
         print(f"  {app:<16} {m['tp']:>8,} {m['tn']:>8,} {m['fp']:>8,} {m['fn']:>8,} "
-              f"{m['f1']:>7.4f} {m['precision']:>7.4f} {m['recall']:>7.4f} {m['mae']:>7.2f}")
+              f"{m['f1']:>7.4f} {m['precision']:>7.4f} {m['recall']:>7.4f} {m['mae']:>7.2f} {m['sae']:>7.2f}")
     avg_f1 = np.mean([metrics[a]['f1'] for a in APPLIANCES])
-    print(f"  {'-'*76}")
-    print(f"  {'Average F1':<16} {'':>8} {'':>8} {'':>8} {'':>8} {avg_f1:>7.4f}")
+    avg_sae = np.mean([metrics[a]['sae'] for a in APPLIANCES])
+    print(f"  {'-'*84}")
+    print(f"  {'Average':<16} {'':>8} {'':>8} {'':>8} {'':>8} {avg_f1:>7.4f} {'':>7} {'':>7} {'':>7} {avg_sae:>7.2f}")
 
 
 # ---------------------------------------------------------------------------
@@ -452,7 +453,7 @@ def train_pinn_model(data_dict, save_dir,
             m = per_app_metrics[app]
             print(f"    {app:<14}  F1={m['f1']:.4f}  "
                   f"P={m['precision']:.4f}  R={m['recall']:.4f}  "
-                  f"MAE={m['mae']:.2f}  "
+                  f"MAE={m['mae']:.2f}  SAE={m['sae']:.2f}  "
                   f"TP={m['tp']:,}  TN={m['tn']:,}  FP={m['fp']:,}  FN={m['fn']:,}")
 
         # Two-phase early stopping
