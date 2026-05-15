@@ -10,10 +10,11 @@ PINN-LNN-CM v2 — four fixes over test_pinn_lnn_cm_ukdale_specific_splits.py
           BCE phase (epoch >= WARMUP_EPOCHS): monitor avg val F1 — higher is better
           Counter resets on phase switch so BCE phase gets a full PATIENCE window.
 
-  Fix 3: BCEWithLogitsLoss with pos_weight
+  Fix 3: BCEWithLogitsLoss with pos_weight, BCE_LAMBDA reduced to 0.05
           pos_weight[i] = n_off / n_on computed from training labels.
-          DW: ~18x, Fridge: ~1.8x. Much stronger ON-class signal than alpha=2.
-          Numerically stable: operates on raw logits, no clamping needed.
+          DW: ~16x, Fridge: ~1.5x. BCE_LAMBDA kept small (0.05) so BCE
+          guides rather than overrides MSE — avoids MAE blowup seen when
+          BCE_LAMBDA=0.5 caused raw outputs to be pushed to extreme logit values.
 
   Fix 4: Freeze shared encoder for first BCE_FREEZE_EPOCHS after warmup
           DW/fridge BCE was corrupting the shared LNN hidden state and collapsing
@@ -75,7 +76,7 @@ THRESHOLDS = {
     'washer dryer':  0.5,
 }
 
-BCE_LAMBDA = {'dish washer': 0.5, 'fridge': 0.3, 'microwave': 0.0, 'washer dryer': 0.0}
+BCE_LAMBDA = {'dish washer': 0.05, 'fridge': 0.05, 'microwave': 0.0, 'washer dryer': 0.0}
 
 
 # ---------------------------------------------------------------------------
